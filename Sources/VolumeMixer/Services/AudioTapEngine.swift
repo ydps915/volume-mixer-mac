@@ -329,7 +329,8 @@ private final class ProcessTapRoute: @unchecked Sendable {
 
     func consumeLevel() -> Float {
         let current = min(max(levelState.load(), 0), 1)
-        levelState.store(current * 0.62)
+        // Keep the peak long enough for the UI to be readable between audio callbacks.
+        levelState.store(current * 0.84)
         return current
     }
 

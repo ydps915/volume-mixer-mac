@@ -1,4 +1,5 @@
 import AppKit
+import Foundation
 import SwiftUI
 
 struct AppMixerRow: View {
@@ -83,6 +84,16 @@ struct AppMixerRow: View {
 struct AudioLevelMeter: View {
     let level: Double
 
+    private var visualLevel: Double {
+        let clampedLevel = min(max(level, 0), 1)
+        guard clampedLevel > 0.0005 else { return 0 }
+
+        // Audio amplitude is logarithmic to the ear. A -54 dB to 0 dB display
+        // range makes normal listening levels visible without masking silence.
+        let decibels = 20 * log10(clampedLevel)
+        return min(max((decibels + 54) / 54, 0), 1)
+    }
+
     var body: some View {
         GeometryReader { proxy in
             Capsule()
@@ -90,13 +101,17 @@ struct AudioLevelMeter: View {
                 .overlay(alignment: .leading) {
                     Capsule()
                         .fill(.green)
-                        .frame(width: proxy.size.width * min(max(level, 0), 1))
+                        .frame(
+                            width: visualLevel == 0
+                                ? 0
+                                : max(7, proxy.size.width * visualLevel)
+                        )
                 }
         }
-        .frame(height: 4)
+        .frame(height: 6)
         .accessibilityLabel("Nível de áudio")
-        .accessibilityValue("\(Int((min(max(level, 0), 1) * 100).rounded()))%")
-        .animation(.linear(duration: 0.08), value: level)
+        .accessibilityValue("\(Int((visualLevel * 100).rounded()))%")
+        .animation(.easeOut(duration: 0.12), value: visualLevel)
     }
 }
 

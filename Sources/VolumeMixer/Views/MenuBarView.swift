@@ -26,6 +26,7 @@ struct MenuBarView: View {
             } else {
                 ForEach(store.sessions.prefix(5)) { session in
                     let preference = store.preference(for: session.bundleID)
+                    let isFavorite = store.isFavorite(session.bundleID)
                     HStack(spacing: 8) {
                         Text(session.displayName)
                             .lineLimit(1)
@@ -48,6 +49,15 @@ struct MenuBarView: View {
                         }
                         .buttonStyle(.borderless)
                         .help(preference.boostEnabled ? "Desativar boost" : "Permitir até 200%")
+                        Button {
+                            store.setFavorite(!isFavorite, for: session.bundleID)
+                        } label: {
+                            Image(systemName: isFavorite ? "star.fill" : "star")
+                                .foregroundStyle(isFavorite ? .yellow : .secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help(isFavorite ? "Remover dos favoritos" : "Favoritar app")
+                        .accessibilityLabel(isFavorite ? "Remover \(session.displayName) dos favoritos" : "Favoritar \(session.displayName)")
                         Button {
                             store.setMuted(!preference.isMuted, for: session.bundleID)
                         } label: {
