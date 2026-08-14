@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>pt-BR</string>
+    <key>CFBundleDisplayName</key>
+    <string>Volume Mixer</string>
+    <key>CFBundleExecutable</key>
+    <string>VolumeMixer</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.ydps915.VolumeMixer</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Volume Mixer</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.2</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>O Volume Mixer precisa capturar o áudio do sistema para ajustar o volume de cada app. O áudio é processado apenas em tempo real neste Mac.</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+</dict>
+</plist>
