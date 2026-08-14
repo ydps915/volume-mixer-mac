@@ -1,5 +1,6 @@
 import AppKit
 
+@MainActor
 enum MenuBarIcon {
     static let image: NSImage = {
         let fallback = NSImage(
