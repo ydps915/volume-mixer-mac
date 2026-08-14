@@ -423,6 +423,6 @@ private final class RealtimeGain: @unchecked Sendable {
     }
 
     private static func clamped(_ value: Float) -> Float {
-        min(max(value, 0), 1)
+        min(max(value, 0), 2)
     }
 }

@@ -103,7 +103,7 @@ final class MixerStore: ObservableObject {
 
     func setVolume(_ volume: Double, for bundleID: String) {
         var preference = appPreferences[bundleID] ?? AppVolumePreference()
-        preference.volume = min(max(volume, 0), 1)
+        preference.volume = min(max(volume, 0), preference.maximumVolume)
         appPreferences[bundleID] = preference
         saveAppPreferences()
         reconcileAudioRoutes()
@@ -119,6 +119,15 @@ final class MixerStore: ObservableObject {
 
     func preference(for bundleID: String) -> AppVolumePreference {
         appPreferences[bundleID] ?? AppVolumePreference()
+    }
+
+    func setBoostEnabled(_ enabled: Bool, for bundleID: String) {
+        var preference = appPreferences[bundleID] ?? AppVolumePreference()
+        preference.boostEnabled = enabled
+        preference.volume = min(preference.volume, preference.maximumVolume)
+        appPreferences[bundleID] = preference
+        saveAppPreferences()
+        reconcileAudioRoutes()
     }
 
     func isFavorite(_ bundleID: String) -> Bool {

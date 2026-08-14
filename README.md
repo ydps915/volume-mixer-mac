@@ -5,6 +5,7 @@ An open-source macOS volume mixer with individual controls for active apps.
 ## What it does
 
 - Per-app volume and mute controls.
+- Optional per-app boost up to 200%; it is off by default and may cause distortion.
 - Favorite an app to keep its control visible even when it is not playing audio.
 - A global master volume and one selected physical output.
 - Menu bar controls, a full window, remembered app preferences, and an optional login item.
@@ -36,7 +37,7 @@ The script builds the Swift package, stages `dist/Volume Mixer.app`, ad-hoc sign
 ## Current limitations
 
 - One global output device; routing different apps to different devices is not in v1.
-- No equalizer, boost above 100%, or recording.
+- No equalizer or recording; per-app boost is capped at 200%.
 - Changing an app's volume causes it to use a private Core Audio tap route. Apps left at 100% remain on the normal system route.
 
 ## Contributing

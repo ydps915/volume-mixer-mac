@@ -14,6 +14,20 @@ final class MixerModelsTests: XCTestCase {
         XCTAssertEqual(preference.effectiveGain(masterVolume: 0.4), 0.4, accuracy: 0.0001)
     }
 
+    func testBoostAllowsPerAppGainUpToTwoHundredPercent() {
+        let preference = AppVolumePreference(volume: 2, isMuted: false, boostEnabled: true)
+        XCTAssertEqual(preference.maximumVolume, 2)
+        XCTAssertEqual(preference.volume, 2)
+        XCTAssertEqual(preference.effectiveGain(masterVolume: 1), 2, accuracy: 0.0001)
+    }
+
+    func testLegacyPreferencesDecodeWithoutBoost() throws {
+        let data = Data(#"{"volume":1.5,"isMuted":false}"#.utf8)
+        let preference = try JSONDecoder().decode(AppVolumePreference.self, from: data)
+        XCTAssertFalse(preference.boostEnabled)
+        XCTAssertEqual(preference.volume, 1)
+    }
+
     func testOutputFallsBackToDefaultWhenPreferredDeviceIsUnavailable() {
         let result = OutputRouteResolver.resolvedOutputUID(
             preferredUID: "headphones",

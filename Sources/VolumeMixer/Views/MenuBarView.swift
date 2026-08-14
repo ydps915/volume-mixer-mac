@@ -34,9 +34,17 @@ struct MenuBarView: View {
                                 get: { store.preference(for: session.bundleID).volume },
                                 set: { store.setVolume($0, for: session.bundleID) }
                             ),
-                            in: 0...1
+                            in: 0...preference.maximumVolume
                         )
                         .disabled(preference.isMuted)
+                        Button {
+                            store.setBoostEnabled(!preference.boostEnabled, for: session.bundleID)
+                        } label: {
+                            Text("2×")
+                                .foregroundStyle(preference.boostEnabled ? .orange : .secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help(preference.boostEnabled ? "Desativar boost" : "Permitir até 200%")
                         Button {
                             store.setMuted(!preference.isMuted, for: session.bundleID)
                         } label: {

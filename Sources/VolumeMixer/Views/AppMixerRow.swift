@@ -27,14 +27,25 @@ struct AppMixerRow: View {
                     get: { store.preference(for: session.bundleID).volume },
                     set: { store.setVolume($0, for: session.bundleID) }
                 ),
-                in: 0...1
+                in: 0...preference.maximumVolume
             )
             .disabled(preference.isMuted)
 
             Text("\(Int((preference.volume * 100).rounded()))%")
                 .font(.callout.monospacedDigit())
-                .foregroundStyle(.secondary)
+                .foregroundStyle(preference.boostEnabled && preference.volume > 1 ? .orange : .secondary)
                 .frame(width: 40, alignment: .trailing)
+
+            Toggle(
+                "Boost",
+                isOn: Binding(
+                    get: { store.preference(for: session.bundleID).boostEnabled },
+                    set: { store.setBoostEnabled($0, for: session.bundleID) }
+                )
+            )
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
+            .help("Permite aumentar este app até 200%. Pode causar distorção.")
 
             Button {
                 store.setMuted(!preference.isMuted, for: session.bundleID)
@@ -60,6 +71,7 @@ struct AppMixerRow: View {
 
     private func statusText(preference: AppVolumePreference) -> String {
         if preference.isMuted { return "Silenciado" }
+        if preference.boostEnabled && preference.volume > 1 { return "Boost ativado" }
         return session.isOutputRunning ? "Áudio ativo" : "Favorito — sem áudio"
     }
 }

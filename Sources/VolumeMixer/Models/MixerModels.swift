@@ -3,15 +3,41 @@ import Foundation
 struct AppVolumePreference: Codable, Equatable, Sendable {
     var volume: Double
     var isMuted: Bool
+    var boostEnabled: Bool
 
-    init(volume: Double = 1, isMuted: Bool = false) {
-        self.volume = min(max(volume, 0), 1)
+    init(volume: Double = 1, isMuted: Bool = false, boostEnabled: Bool = false) {
+        self.boostEnabled = boostEnabled
+        self.volume = min(max(volume, 0), boostEnabled ? 2 : 1)
         self.isMuted = isMuted
     }
 
+    var maximumVolume: Double { boostEnabled ? 2 : 1 }
+
     func effectiveGain(masterVolume: Double) -> Float {
         guard !isMuted else { return 0 }
-        return Float(min(max(volume * masterVolume, 0), 1))
+        return Float(min(max(volume * masterVolume, 0), maximumVolume))
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case volume
+        case isMuted
+        case boostEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            volume: try container.decodeIfPresent(Double.self, forKey: .volume) ?? 1,
+            isMuted: try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false,
+            boostEnabled: try container.decodeIfPresent(Bool.self, forKey: .boostEnabled) ?? false
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(volume, forKey: .volume)
+        try container.encode(isMuted, forKey: .isMuted)
+        try container.encode(boostEnabled, forKey: .boostEnabled)
     }
 }
 
