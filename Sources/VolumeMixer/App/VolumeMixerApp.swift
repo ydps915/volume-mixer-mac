@@ -12,9 +12,12 @@ struct VolumeMixerApp: App {
         .defaultSize(width: 560, height: 520)
         .windowResizability(.contentMinSize)
 
-        MenuBarExtra("Volume Mixer", systemImage: "slider.horizontal.3") {
+        MenuBarExtra {
             MenuBarView()
                 .environmentObject(store)
+        } label: {
+            Image(nsImage: MenuBarIcon.image)
+                .accessibilityLabel("Volume Mixer")
         }
         .menuBarExtraStyle(.window)
 

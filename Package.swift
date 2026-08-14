@@ -16,7 +16,10 @@ let package = Package(
         .executableTarget(
             name: "VolumeMixer",
             dependencies: ["AtomicGain"],
-            path: "Sources/VolumeMixer"
+            path: "Sources/VolumeMixer",
+            resources: [
+                .copy("Resources/MenuBarIcon.png"),
+            ]
         ),
         .testTarget(
             name: "VolumeMixerTests",

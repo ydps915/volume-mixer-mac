@@ -8,6 +8,7 @@ An open-source macOS volume mixer with individual controls for active apps.
 - Optional per-app boost up to 200%; it is off by default and may cause distortion.
 - A live green meter for each active app, using a perceptual dB scale so normal listening levels remain visible.
 - Favorite an app to keep its control visible even when it is not playing audio.
+- A custom app icon and a monochrome menu-bar glyph that adapts to light and dark macOS menu bars.
 - A global master volume and one selected physical output.
 - Menu bar controls, a full window, remembered app preferences, and an optional login item.
 - Automatic fallback to the macOS default output when the selected device disappears.

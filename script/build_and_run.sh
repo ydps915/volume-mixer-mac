@@ -17,9 +17,10 @@ swift build
 BUILD_BINARY="$(swift build --show-bin-path)/$EXECUTABLE_NAME"
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp "$BUILD_BINARY" "$APP_BINARY"
 cp "$ROOT_DIR/AppBundle/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
+cp "$ROOT_DIR/AppBundle/Assets/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 chmod +x "$APP_BINARY"
 codesign --force --sign - "$APP_BUNDLE" >/dev/null
 
