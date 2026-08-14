@@ -13,12 +13,27 @@ struct SettingsView: View {
                         set: { store.setLaunchAtLogin($0) }
                     )
                 )
+                .tint(.blue)
 
                 if let loginItemError = store.loginItemError {
                     Text(loginItemError)
                         .font(.callout)
                         .foregroundStyle(.red)
                 }
+            }
+
+            Section("Chamadas e streams") {
+                Toggle(
+                    "Proteger Discord em chamadas e streams",
+                    isOn: Binding(
+                        get: { store.settings.protectDiscordDuringStreams },
+                        set: { store.setDiscordStreamProtection($0) }
+                    )
+                )
+                .tint(.blue)
+
+                Text("Quando ativo, o Volume Mixer não lê, silencia ou redireciona o áudio do Discord. Isso evita que a rota do mixer realimente compartilhamentos de tela. Desative apenas se quiser controlar o Discord pelo mixer.")
+                    .foregroundStyle(.secondary)
             }
 
             Section("Privacidade") {

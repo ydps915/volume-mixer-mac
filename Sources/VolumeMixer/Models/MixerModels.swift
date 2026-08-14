@@ -46,17 +46,51 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
     var preferredOutputUID: String?
     var mixerEnabled: Bool
     var launchAtLogin: Bool
+    var protectDiscordDuringStreams: Bool
 
     init(
         masterVolume: Double = 1,
         preferredOutputUID: String? = nil,
         mixerEnabled: Bool = false,
-        launchAtLogin: Bool = false
+        launchAtLogin: Bool = false,
+        protectDiscordDuringStreams: Bool = true
     ) {
         self.masterVolume = min(max(masterVolume, 0), 1)
         self.preferredOutputUID = preferredOutputUID
         self.mixerEnabled = mixerEnabled
         self.launchAtLogin = launchAtLogin
+        self.protectDiscordDuringStreams = protectDiscordDuringStreams
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case masterVolume
+        case preferredOutputUID
+        case mixerEnabled
+        case launchAtLogin
+        case protectDiscordDuringStreams
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            masterVolume: try container.decodeIfPresent(Double.self, forKey: .masterVolume) ?? 1,
+            preferredOutputUID: try container.decodeIfPresent(String.self, forKey: .preferredOutputUID),
+            mixerEnabled: try container.decodeIfPresent(Bool.self, forKey: .mixerEnabled) ?? false,
+            launchAtLogin: try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false,
+            protectDiscordDuringStreams: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .protectDiscordDuringStreams
+            ) ?? true
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(masterVolume, forKey: .masterVolume)
+        try container.encodeIfPresent(preferredOutputUID, forKey: .preferredOutputUID)
+        try container.encode(mixerEnabled, forKey: .mixerEnabled)
+        try container.encode(launchAtLogin, forKey: .launchAtLogin)
+        try container.encode(protectDiscordDuringStreams, forKey: .protectDiscordDuringStreams)
     }
 }
 
@@ -144,6 +178,15 @@ struct RouteTarget: Equatable, Sendable {
     let id: String
     let processObjectIDs: [UInt32]
     let gain: Float
+}
+
+enum StreamSafetyPolicy {
+    static func excludesFromMixerCapture(bundleID: String) -> Bool {
+        let normalizedBundleID = bundleID.lowercased()
+        return normalizedBundleID.hasPrefix("com.hnc.discord")
+            || normalizedBundleID.hasPrefix("com.discord.discord")
+            || normalizedBundleID.hasPrefix("com.discordapp.discord")
+    }
 }
 
 enum OutputRouteResolver {

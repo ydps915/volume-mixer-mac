@@ -27,16 +27,25 @@ enum AudioHardware {
             }
 
             let application = NSRunningApplication(processIdentifier: pid_t(processID))
-            let bundleID = stringProperty(
+            let rawBundleID = stringProperty(
                 objectID: processObjectID,
                 selector: kAudioProcessPropertyBundleID
             ) ?? application?.bundleIdentifier
 
-            guard let bundleID, bundleID != Bundle.main.bundleIdentifier else {
+            guard let rawBundleID else {
                 continue
             }
 
-            let displayName = application?.localizedName ?? bundleID
+            let bundleID = ProcessAppIdentity.canonicalBundleID(
+                rawBundleID: rawBundleID,
+                bundleURL: application?.bundleURL
+            )
+            guard bundleID != Bundle.main.bundleIdentifier else { continue }
+
+            let displayName = ProcessAppIdentity.displayName(
+                rawBundleID: rawBundleID,
+                application: application
+            )
             var entry = grouped[bundleID] ?? (displayName, [], [])
             entry.objects.append(processObjectID)
             entry.pids.append(processID)

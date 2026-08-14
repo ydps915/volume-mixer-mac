@@ -10,6 +10,7 @@ final class AudioTapEngine: ObservableObject {
     @Published private(set) var state: MixerEngineState = .inactive
     var onStateChange: (@MainActor (MixerEngineState) -> Void)?
     var onLevelsChange: (@MainActor ([String: Float]) -> Void)?
+    var onRoutingIssueChange: (@MainActor (String?) -> Void)?
 
     private let controller: AudioRouteController
 
@@ -55,10 +56,9 @@ final class AudioTapEngine: ObservableObject {
 
     func reconcile(targets: [RouteTarget], outputDeviceUID: String?) {
         guard case .active = state else { return }
-        controller.reconcile(targets: targets, outputDeviceUID: outputDeviceUID) { [weak self] error in
-            guard let error else { return }
+        controller.reconcile(targets: targets, outputDeviceUID: outputDeviceUID) { [weak self] issue in
             Task { @MainActor in
-                self?.setState(.failed(error))
+                self?.onRoutingIssueChange?(issue)
             }
         }
     }
@@ -67,6 +67,7 @@ final class AudioTapEngine: ObservableObject {
         controller.stopAll()
         setState(.inactive)
         onLevelsChange?([:])
+        onRoutingIssueChange?(nil)
     }
 
     private func setState(_ newState: MixerEngineState) {
@@ -178,7 +179,7 @@ private final class AudioRouteController: @unchecked Sendable {
         }
 
         if errors.isEmpty { return nil }
-        return "Não foi possível criar a rota de áudio para: \(errors.sorted().joined(separator: ", "))."
+        return "Alguns apps não puderam ser roteados agora: \(errors.sorted().joined(separator: ", ")). O áudio deles continua na saída padrão e o mixer tentará novamente."
     }
 
     private func retireRoute(id: String) {

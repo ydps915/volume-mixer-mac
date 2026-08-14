@@ -17,6 +17,7 @@ struct MenuBarView: View {
                         set: { store.setMixerEnabled($0) }
                     )
                 )
+                .tint(.blue)
                 .labelsHidden()
             }
 
@@ -27,9 +28,15 @@ struct MenuBarView: View {
                 ForEach(store.sessions.prefix(5)) { session in
                     let preference = store.preference(for: session.bundleID)
                     let isFavorite = store.isFavorite(session.bundleID)
+                    let isProtectedFromCapture = store.isProtectedFromMixerCapture(session.bundleID)
                     HStack(spacing: 8) {
                         Text(session.displayName)
                             .lineLimit(1)
+                        if isProtectedFromCapture {
+                            Image(systemName: "lock.fill")
+                                .foregroundStyle(.secondary)
+                                .help("Protegido de chamadas e streams")
+                        }
                         VStack(spacing: 3) {
                             Slider(
                                 value: Binding(
@@ -38,7 +45,7 @@ struct MenuBarView: View {
                                 ),
                                 in: 0...preference.maximumVolume
                             )
-                            .disabled(preference.isMuted)
+                            .disabled(preference.isMuted || isProtectedFromCapture)
                             AudioLevelMeter(level: store.level(for: session.bundleID))
                         }
                         Button {
@@ -48,6 +55,7 @@ struct MenuBarView: View {
                                 .foregroundStyle(preference.boostEnabled ? .orange : .secondary)
                         }
                         .buttonStyle(.borderless)
+                        .disabled(isProtectedFromCapture)
                         .help(preference.boostEnabled ? "Desativar boost" : "Permitir até 200%")
                         Button {
                             store.setFavorite(!isFavorite, for: session.bundleID)
@@ -64,6 +72,7 @@ struct MenuBarView: View {
                             Image(systemName: preference.isMuted ? "speaker.slash.fill" : "speaker.wave.2")
                         }
                         .buttonStyle(.borderless)
+                        .disabled(isProtectedFromCapture)
                     }
                 }
             }

@@ -9,6 +9,7 @@ struct AppMixerRow: View {
     var body: some View {
         let preference = store.preference(for: session.bundleID)
         let isFavorite = store.isFavorite(session.bundleID)
+        let isProtectedFromCapture = store.isProtectedFromMixerCapture(session.bundleID)
 
         HStack(spacing: 12) {
             AppIcon(bundleID: session.bundleID)
@@ -17,7 +18,7 @@ struct AppMixerRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(session.displayName)
                     .lineLimit(1)
-                Text(statusText(preference: preference))
+                Text(statusText(preference: preference, isProtectedFromCapture: isProtectedFromCapture))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -31,7 +32,7 @@ struct AppMixerRow: View {
                     ),
                     in: 0...preference.maximumVolume
                 )
-                .disabled(preference.isMuted)
+                .disabled(preference.isMuted || isProtectedFromCapture)
 
                 AudioLevelMeter(level: store.level(for: session.bundleID))
             }
@@ -50,6 +51,7 @@ struct AppMixerRow: View {
             )
             .toggleStyle(.checkbox)
             .controlSize(.small)
+            .disabled(isProtectedFromCapture)
             .help("Permite aumentar este app até 200%. Pode causar distorção.")
 
             Button {
@@ -58,6 +60,7 @@ struct AppMixerRow: View {
                 Image(systemName: preference.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
             }
             .buttonStyle(.borderless)
+            .disabled(isProtectedFromCapture)
             .help(preference.isMuted ? "Ativar som" : "Silenciar")
             .accessibilityLabel(preference.isMuted ? "Ativar som de \(session.displayName)" : "Silenciar \(session.displayName)")
 
@@ -74,7 +77,11 @@ struct AppMixerRow: View {
         .padding(.vertical, 4)
     }
 
-    private func statusText(preference: AppVolumePreference) -> String {
+    private func statusText(
+        preference: AppVolumePreference,
+        isProtectedFromCapture: Bool
+    ) -> String {
+        if isProtectedFromCapture { return "Protegido de streams" }
         if preference.isMuted { return "Silenciado" }
         if preference.boostEnabled && preference.volume > 1 { return "Boost ativado" }
         return session.isOutputRunning ? "Áudio ativo" : "Favorito — sem áudio"

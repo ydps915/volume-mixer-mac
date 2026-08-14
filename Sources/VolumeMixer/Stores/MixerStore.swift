@@ -11,6 +11,7 @@ final class MixerStore: ObservableObject {
     @Published private(set) var systemAudioPermission: SystemAudioPermissionState = .unknown
     @Published private(set) var appLevels: [String: Double] = [:]
     @Published private(set) var fallbackMessage: String?
+    @Published private(set) var routingIssue: String?
     @Published private(set) var loginItemError: String?
 
     private let repository: MixerPreferencesRepository
@@ -26,15 +27,27 @@ final class MixerStore: ObservableObject {
     ) {
         self.repository = repository
         self.settings = repository.loadSettings()
-        self.appPreferences = repository.loadAppPreferences()
-        self.favoriteBundleIDs = repository.loadFavoriteBundleIDs()
+        let loadedAppPreferences = repository.loadAppPreferences()
+        let loadedFavoriteBundleIDs = repository.loadFavoriteBundleIDs()
+        self.appPreferences = Self.canonicalizedAppPreferences(loadedAppPreferences)
+        self.favoriteBundleIDs = Self.canonicalizedBundleIDs(loadedFavoriteBundleIDs)
         self.engine = engine
         self.engineState = engine.state
+
+        if self.appPreferences != loadedAppPreferences {
+            repository.save(appPreferences: self.appPreferences)
+        }
+        if self.favoriteBundleIDs != loadedFavoriteBundleIDs {
+            repository.save(favoriteBundleIDs: self.favoriteBundleIDs)
+        }
         engine.onStateChange = { [weak self] state in
             self?.engineState = state
         }
         engine.onLevelsChange = { [weak self] levels in
             self?.appLevels = levels.mapValues(Double.init)
+        }
+        engine.onRoutingIssueChange = { [weak self] issue in
+            self?.routingIssue = issue
         }
     }
 
@@ -42,7 +55,7 @@ final class MixerStore: ObservableObject {
         guard !hasStarted else { return }
         hasStarted = true
         refresh()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
             }
@@ -70,6 +83,7 @@ final class MixerStore: ObservableObject {
         guard enabled else {
             engine.stop()
             appLevels = [:]
+            routingIssue = nil
             return
         }
 
@@ -164,6 +178,17 @@ final class MixerStore: ObservableObject {
         }
     }
 
+    func setDiscordStreamProtection(_ enabled: Bool) {
+        settings.protectDiscordDuringStreams = enabled
+        saveSettings()
+        reconcileAudioRoutes()
+    }
+
+    func isProtectedFromMixerCapture(_ bundleID: String) -> Bool {
+        settings.protectDiscordDuringStreams
+            && StreamSafetyPolicy.excludesFromMixerCapture(bundleID: bundleID)
+    }
+
     func openSystemSettings() {
         guard let url = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AudioCapture"
@@ -193,13 +218,24 @@ final class MixerStore: ObservableObject {
     }
 
     private func reconcileAudioRoutes() {
-        let targets = sessions.map { session in
+        let protectedBundleIDs = Set(
+            sessions
+                .filter { isProtectedFromMixerCapture($0.bundleID) }
+                .map(\.bundleID)
+        )
+        if !protectedBundleIDs.isEmpty {
+            appLevels = appLevels.filter { !protectedBundleIDs.contains($0.key) }
+        }
+
+        let targets = sessions
+            .filter { !isProtectedFromMixerCapture($0.bundleID) }
+            .map { session in
             RouteTarget(
                 id: session.bundleID,
                 processObjectIDs: session.processObjectIDs,
                 gain: preference(for: session.bundleID).effectiveGain(masterVolume: settings.masterVolume)
             )
-        }
+            }
         engine.reconcile(targets: targets, outputDeviceUID: resolvedOutputUID)
     }
 
@@ -224,5 +260,29 @@ final class MixerStore: ObservableObject {
 
     private func saveAppPreferences() {
         repository.save(appPreferences: appPreferences)
+    }
+
+    private static func canonicalizedAppPreferences(
+        _ preferences: [String: AppVolumePreference]
+    ) -> [String: AppVolumePreference] {
+        var normalized = preferences
+        for (bundleID, preference) in preferences {
+            let canonicalBundleID = ProcessAppIdentity.canonicalBundleID(
+                rawBundleID: bundleID,
+                bundleURL: nil
+            )
+            guard canonicalBundleID != bundleID else { continue }
+            if preferences[canonicalBundleID] == nil {
+                normalized[canonicalBundleID] = preference
+            }
+            normalized.removeValue(forKey: bundleID)
+        }
+        return normalized
+    }
+
+    private static func canonicalizedBundleIDs(_ bundleIDs: Set<String>) -> Set<String> {
+        Set(bundleIDs.map {
+            ProcessAppIdentity.canonicalBundleID(rawBundleID: $0, bundleURL: nil)
+        })
     }
 }

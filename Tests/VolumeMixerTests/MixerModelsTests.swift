@@ -28,6 +28,54 @@ final class MixerModelsTests: XCTestCase {
         XCTAssertEqual(preference.volume, 1)
     }
 
+    func testLegacySettingsEnableDiscordProtectionByDefault() throws {
+        let data = Data(#"{"masterVolume":0.8,"mixerEnabled":true,"launchAtLogin":false}"#.utf8)
+        let settings = try JSONDecoder().decode(MixerAppSettings.self, from: data)
+        XCTAssertTrue(settings.protectDiscordDuringStreams)
+        XCTAssertEqual(settings.masterVolume, 0.8)
+    }
+
+    func testDiscordStreamSafetyMatchesMainAppAndHelperBundleIDs() {
+        XCTAssertTrue(StreamSafetyPolicy.excludesFromMixerCapture(bundleID: "com.hnc.Discord"))
+        XCTAssertTrue(StreamSafetyPolicy.excludesFromMixerCapture(bundleID: "com.hnc.Discord.helper.Renderer"))
+        XCTAssertFalse(StreamSafetyPolicy.excludesFromMixerCapture(bundleID: "com.google.Chrome"))
+    }
+
+    func testHelperProcessesResolveToTheirOwningApp() {
+        let chromeHelperURL = URL(fileURLWithPath:
+            "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper (Renderer).app"
+        )
+        XCTAssertEqual(
+            ProcessAppIdentity.outerApplicationURL(for: chromeHelperURL)?.path,
+            "/Applications/Google Chrome.app"
+        )
+        XCTAssertEqual(
+            ProcessAppIdentity.canonicalBundleID(
+                rawBundleID: "com.google.Chrome.helper.Renderer",
+                bundleURL: nil
+            ),
+            "com.google.Chrome"
+        )
+    }
+
+    @MainActor
+    func testLegacyHelperPreferencesMigrateToChrome() {
+        let suiteName = "VolumeMixerMigrationTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let repository = MixerPreferencesRepository(defaults: defaults)
+
+        repository.save(appPreferences: [
+            "com.google.Chrome.helper.Renderer": AppVolumePreference(volume: 0.35, isMuted: true),
+        ])
+        repository.save(favoriteBundleIDs: ["com.google.Chrome.helper.Renderer"])
+
+        let store = MixerStore(repository: repository)
+        XCTAssertEqual(store.preference(for: "com.google.Chrome").volume, 0.35)
+        XCTAssertTrue(store.preference(for: "com.google.Chrome").isMuted)
+        XCTAssertTrue(store.isFavorite("com.google.Chrome"))
+    }
+
     func testOutputFallsBackToDefaultWhenPreferredDeviceIsUnavailable() {
         let result = OutputRouteResolver.resolvedOutputUID(
             preferredUID: "headphones",

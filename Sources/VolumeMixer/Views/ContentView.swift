@@ -42,6 +42,7 @@ struct ContentView: View {
                 )
             )
             .toggleStyle(.switch)
+            .tint(.blue)
             .labelsHidden()
             .accessibilityLabel("Mixer ativo")
         }
@@ -67,6 +68,13 @@ struct ContentView: View {
                 Label(fallbackMessage, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
                     .foregroundStyle(.orange)
+            }
+
+            if let routingIssue = store.routingIssue {
+                Label(routingIssue, systemImage: "arrow.triangle.2.circlepath")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack {
