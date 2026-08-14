@@ -22,14 +22,18 @@ struct AppMixerRow: View {
             }
             .frame(width: 145, alignment: .leading)
 
-            Slider(
-                value: Binding(
-                    get: { store.preference(for: session.bundleID).volume },
-                    set: { store.setVolume($0, for: session.bundleID) }
-                ),
-                in: 0...preference.maximumVolume
-            )
-            .disabled(preference.isMuted)
+            VStack(spacing: 4) {
+                Slider(
+                    value: Binding(
+                        get: { store.preference(for: session.bundleID).volume },
+                        set: { store.setVolume($0, for: session.bundleID) }
+                    ),
+                    in: 0...preference.maximumVolume
+                )
+                .disabled(preference.isMuted)
+
+                AudioLevelMeter(level: store.level(for: session.bundleID))
+            }
 
             Text("\(Int((preference.volume * 100).rounded()))%")
                 .font(.callout.monospacedDigit())
@@ -73,6 +77,26 @@ struct AppMixerRow: View {
         if preference.isMuted { return "Silenciado" }
         if preference.boostEnabled && preference.volume > 1 { return "Boost ativado" }
         return session.isOutputRunning ? "Áudio ativo" : "Favorito — sem áudio"
+    }
+}
+
+struct AudioLevelMeter: View {
+    let level: Double
+
+    var body: some View {
+        GeometryReader { proxy in
+            Capsule()
+                .fill(.quaternary)
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(.green)
+                        .frame(width: proxy.size.width * min(max(level, 0), 1))
+                }
+        }
+        .frame(height: 4)
+        .accessibilityLabel("Nível de áudio")
+        .accessibilityValue("\(Int((min(max(level, 0), 1) * 100).rounded()))%")
+        .animation(.linear(duration: 0.08), value: level)
     }
 }
 

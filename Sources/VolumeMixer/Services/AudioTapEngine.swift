@@ -9,8 +9,19 @@ import OSLog
 final class AudioTapEngine: ObservableObject {
     @Published private(set) var state: MixerEngineState = .inactive
     var onStateChange: (@MainActor (MixerEngineState) -> Void)?
+    var onLevelsChange: (@MainActor ([String: Float]) -> Void)?
 
-    private let controller = AudioRouteController()
+    private let controller: AudioRouteController
+
+    init() {
+        let controller = AudioRouteController()
+        self.controller = controller
+        controller.onLevels = { [weak self] levels in
+            Task { @MainActor in
+                self?.onLevelsChange?(levels)
+            }
+        }
+    }
 
     func checkSystemAudioPermission(completion: @escaping @MainActor (Bool) -> Void) {
         guard #available(macOS 14.2, *) else {
@@ -55,6 +66,7 @@ final class AudioTapEngine: ObservableObject {
     func stop() {
         controller.stopAll()
         setState(.inactive)
+        onLevelsChange?([:])
     }
 
     private func setState(_ newState: MixerEngineState) {
@@ -69,6 +81,8 @@ private final class AudioRouteController: @unchecked Sendable {
         qos: .userInitiated
     )
     private var routes: [String: ProcessTapRoute] = [:]
+    private var levelTimer: DispatchSourceTimer?
+    var onLevels: (@Sendable ([String: Float]) -> Void)?
 
     func requestSystemAudioPermission(completion: @escaping @Sendable (Bool) -> Void) {
         queue.async {
@@ -102,7 +116,9 @@ private final class AudioRouteController: @unchecked Sendable {
     ) {
         queue.async { [weak self] in
             guard let self else { return }
-            completion(self.apply(targets: targets, outputDeviceUID: outputDeviceUID))
+            let error = self.apply(targets: targets, outputDeviceUID: outputDeviceUID)
+            self.refreshLevelTimer()
+            completion(error)
         }
     }
 
@@ -112,6 +128,7 @@ private final class AudioRouteController: @unchecked Sendable {
             let existingRoutes = Array(self.routes.values)
             self.routes.removeAll()
             existingRoutes.forEach { $0.stop() }
+            self.refreshLevelTimer()
         }
     }
 
@@ -128,7 +145,7 @@ private final class AudioRouteController: @unchecked Sendable {
 
         let desired = Dictionary(
             uniqueKeysWithValues: targets
-                .filter { !$0.processObjectIDs.isEmpty && !isUnity($0.gain) }
+                .filter { !$0.processObjectIDs.isEmpty }
                 .map { ($0.id, $0) }
         )
 
@@ -138,9 +155,11 @@ private final class AudioRouteController: @unchecked Sendable {
 
         var errors: [String] = []
         for (id, target) in desired {
+            let mode: ProcessTapRouteMode = isUnity(target.gain) ? .monitoring : .mixing
             if let route = routes[id],
                route.processObjectIDs == target.processObjectIDs,
-               route.outputDeviceUID == outputDeviceUID {
+               route.outputDeviceUID == outputDeviceUID,
+               route.mode == mode {
                 route.setGain(target.gain)
                 continue
             }
@@ -149,7 +168,8 @@ private final class AudioRouteController: @unchecked Sendable {
             guard let route = ProcessTapRoute(
                 processObjectIDs: target.processObjectIDs,
                 outputDeviceUID: outputDeviceUID,
-                gain: target.gain
+                gain: target.gain,
+                mode: mode
             ) else {
                 errors.append(id)
                 continue
@@ -173,22 +193,59 @@ private final class AudioRouteController: @unchecked Sendable {
         existingRoutes.forEach { $0.stop() }
     }
 
+    private func refreshLevelTimer() {
+        guard !routes.isEmpty else {
+            levelTimer?.cancel()
+            levelTimer = nil
+            onLevels?([:])
+            return
+        }
+
+        guard levelTimer == nil else { return }
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(80))
+        timer.setEventHandler { [weak self] in
+            self?.publishLevels()
+        }
+        levelTimer = timer
+        timer.resume()
+    }
+
+    private func publishLevels() {
+        let levels = routes.reduce(into: [String: Float]()) { result, route in
+            result[route.key] = route.value.consumeLevel()
+        }
+        onLevels?(levels)
+    }
+
     private func isUnity(_ gain: Float) -> Bool {
         abs(gain - 1) < 0.001
     }
 }
 
+private enum ProcessTapRouteMode: Equatable, Sendable {
+    case monitoring
+    case mixing
+}
+
 private final class ProcessTapRoute: @unchecked Sendable {
     let processObjectIDs: [UInt32]
     let outputDeviceUID: String
+    let mode: ProcessTapRouteMode
 
     private let gainState: RealtimeGain
+    private let levelState = RealtimeGain(initialValue: 0)
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private var isRunning = false
 
-    init?(processObjectIDs: [UInt32], outputDeviceUID: String, gain: Float) {
+    init?(
+        processObjectIDs: [UInt32],
+        outputDeviceUID: String,
+        gain: Float,
+        mode: ProcessTapRouteMode
+    ) {
         guard #available(macOS 14.2, *),
               !processObjectIDs.isEmpty,
               AudioHardware.outputChannelCount(deviceUID: outputDeviceUID) == 2 else {
@@ -197,12 +254,13 @@ private final class ProcessTapRoute: @unchecked Sendable {
 
         self.processObjectIDs = processObjectIDs
         self.outputDeviceUID = outputDeviceUID
+        self.mode = mode
         self.gainState = RealtimeGain(initialValue: gain)
 
         let description = CATapDescription(stereoMixdownOfProcesses: processObjectIDs)
         description.name = "Volume Mixer \(UUID().uuidString)"
         description.isPrivate = true
-        description.muteBehavior = .mutedWhenTapped
+        description.muteBehavior = mode == .mixing ? .mutedWhenTapped : .unmuted
 
         guard AudioHardwareCreateProcessTap(description, &tapID) == noErr,
               tapID != kAudioObjectUnknown,
@@ -238,6 +296,7 @@ private final class ProcessTapRoute: @unchecked Sendable {
         }
 
         let gainState = gainState
+        let levelState = levelState
         guard AudioDeviceCreateIOProcIDWithBlock(
             &ioProcID,
             aggregateDeviceID,
@@ -247,7 +306,9 @@ private final class ProcessTapRoute: @unchecked Sendable {
                     inputData: inputData,
                     outputData: outputData,
                     format: format,
-                    gain: gainState.load()
+                    gain: gainState.load(),
+                    levelState: levelState,
+                    shouldWriteOutput: mode == .mixing
                 )
             }
         ) == noErr, let ioProcID else {
@@ -264,6 +325,12 @@ private final class ProcessTapRoute: @unchecked Sendable {
 
     func setGain(_ gain: Float) {
         gainState.store(gain)
+    }
+
+    func consumeLevel() -> Float {
+        let current = min(max(levelState.load(), 0), 1)
+        levelState.store(current * 0.62)
+        return current
     }
 
     func stop() {
@@ -313,8 +380,13 @@ private final class ProcessTapRoute: @unchecked Sendable {
         inputData: UnsafePointer<AudioBufferList>,
         outputData: UnsafeMutablePointer<AudioBufferList>,
         format: AudioStreamBasicDescription,
-        gain: Float
+        gain: Float,
+        levelState: RealtimeGain,
+        shouldWriteOutput: Bool
     ) {
+        levelState.store(peakLevel(inputData: inputData, format: format) * min(gain, 1))
+        guard shouldWriteOutput else { return }
+
         let inputs = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: inputData)
         )
@@ -325,6 +397,43 @@ private final class ProcessTapRoute: @unchecked Sendable {
             write(input: inputs[index], output: &output, format: format, gain: gain)
             outputs[index] = output
         }
+    }
+
+    private static func peakLevel(
+        inputData: UnsafePointer<AudioBufferList>,
+        format: AudioStreamBasicDescription
+    ) -> Float {
+        let buffers = UnsafeMutableAudioBufferListPointer(
+            UnsafeMutablePointer(mutating: inputData)
+        )
+        let flags = format.mFormatFlags
+        var peak: Float = 0
+
+        for buffer in buffers {
+            guard let data = buffer.mData else { continue }
+            if flags & kAudioFormatFlagIsFloat != 0, format.mBitsPerChannel == 32 {
+                let values = data.assumingMemoryBound(to: Float.self)
+                for index in 0..<(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size) {
+                    peak = max(peak, abs(values[index]))
+                }
+            } else if flags & kAudioFormatFlagIsFloat != 0, format.mBitsPerChannel == 64 {
+                let values = data.assumingMemoryBound(to: Double.self)
+                for index in 0..<(Int(buffer.mDataByteSize) / MemoryLayout<Double>.size) {
+                    peak = max(peak, Float(abs(values[index])))
+                }
+            } else if format.mBitsPerChannel == 16 {
+                let values = data.assumingMemoryBound(to: Int16.self)
+                for index in 0..<(Int(buffer.mDataByteSize) / MemoryLayout<Int16>.size) {
+                    peak = max(peak, abs(Float(values[index])) / 32_768)
+                }
+            } else if format.mBitsPerChannel == 32 {
+                let values = data.assumingMemoryBound(to: Int32.self)
+                for index in 0..<(Int(buffer.mDataByteSize) / MemoryLayout<Int32>.size) {
+                    peak = max(peak, Float(abs(Double(values[index])) / 2_147_483_648))
+                }
+            }
+        }
+        return min(peak, 1)
     }
 
     private static func write(

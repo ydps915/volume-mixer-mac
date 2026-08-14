@@ -29,14 +29,17 @@ struct MenuBarView: View {
                     HStack(spacing: 8) {
                         Text(session.displayName)
                             .lineLimit(1)
-                        Slider(
-                            value: Binding(
-                                get: { store.preference(for: session.bundleID).volume },
-                                set: { store.setVolume($0, for: session.bundleID) }
-                            ),
-                            in: 0...preference.maximumVolume
-                        )
-                        .disabled(preference.isMuted)
+                        VStack(spacing: 3) {
+                            Slider(
+                                value: Binding(
+                                    get: { store.preference(for: session.bundleID).volume },
+                                    set: { store.setVolume($0, for: session.bundleID) }
+                                ),
+                                in: 0...preference.maximumVolume
+                            )
+                            .disabled(preference.isMuted)
+                            AudioLevelMeter(level: store.level(for: session.bundleID))
+                        }
                         Button {
                             store.setBoostEnabled(!preference.boostEnabled, for: session.bundleID)
                         } label: {

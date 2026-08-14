@@ -9,6 +9,7 @@ final class MixerStore: ObservableObject {
     @Published private(set) var settings: MixerAppSettings
     @Published private(set) var engineState: MixerEngineState = .inactive
     @Published private(set) var systemAudioPermission: SystemAudioPermissionState = .unknown
+    @Published private(set) var appLevels: [String: Double] = [:]
     @Published private(set) var fallbackMessage: String?
     @Published private(set) var loginItemError: String?
 
@@ -31,6 +32,9 @@ final class MixerStore: ObservableObject {
         self.engineState = engine.state
         engine.onStateChange = { [weak self] state in
             self?.engineState = state
+        }
+        engine.onLevelsChange = { [weak self] levels in
+            self?.appLevels = levels.mapValues(Double.init)
         }
     }
 
@@ -65,6 +69,7 @@ final class MixerStore: ObservableObject {
 
         guard enabled else {
             engine.stop()
+            appLevels = [:]
             return
         }
 
@@ -119,6 +124,10 @@ final class MixerStore: ObservableObject {
 
     func preference(for bundleID: String) -> AppVolumePreference {
         appPreferences[bundleID] ?? AppVolumePreference()
+    }
+
+    func level(for bundleID: String) -> Double {
+        appLevels[bundleID] ?? 0
     }
 
     func setBoostEnabled(_ enabled: Bool, for bundleID: String) {
