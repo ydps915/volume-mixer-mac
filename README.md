@@ -10,6 +10,7 @@ An open-source macOS volume mixer with individual controls for active apps.
 - Automatic fallback to the macOS default output when the selected device disappears.
 
 The app uses Apple's public Core Audio Taps API rather than installing a virtual audio driver. It runs only on macOS 14.2 or later and requests **System Audio Recording** permission when the mixer is enabled.
+The app and Preferences window always show the current permission check result and provide **Check** and **Open Settings** actions.
 
 ## Privacy
 

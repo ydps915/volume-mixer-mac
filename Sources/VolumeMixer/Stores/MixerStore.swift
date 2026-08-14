@@ -8,6 +8,7 @@ final class MixerStore: ObservableObject {
     @Published private(set) var outputDevices: [AudioOutputDevice] = []
     @Published private(set) var settings: MixerAppSettings
     @Published private(set) var engineState: MixerEngineState = .inactive
+    @Published private(set) var systemAudioPermission: SystemAudioPermissionState = .unknown
     @Published private(set) var fallbackMessage: String?
     @Published private(set) var loginItemError: String?
 
@@ -62,14 +63,23 @@ final class MixerStore: ObservableObject {
             return
         }
 
+        systemAudioPermission = .checking
         engine.activate { [weak self] granted in
             guard let self else { return }
+            self.systemAudioPermission = granted ? .granted : .required
             guard granted else {
                 self.settings.mixerEnabled = false
                 self.saveSettings()
                 return
             }
             self.reconcileAudioRoutes()
+        }
+    }
+
+    func checkSystemAudioPermission() {
+        systemAudioPermission = .checking
+        engine.checkSystemAudioPermission { [weak self] granted in
+            self?.systemAudioPermission = granted ? .granted : .required
         }
     }
 

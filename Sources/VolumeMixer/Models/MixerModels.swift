@@ -76,6 +76,44 @@ enum MixerEngineState: Equatable, Sendable {
     }
 }
 
+enum SystemAudioPermissionState: Equatable, Sendable {
+    case unknown
+    case checking
+    case granted
+    case required
+
+    var title: String {
+        switch self {
+        case .unknown: "Não verificada"
+        case .checking: "Verificando"
+        case .granted: "Ativa"
+        case .required: "Necessária"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .unknown:
+            "Verifique se o macOS já autorizou a captura de áudio do sistema."
+        case .checking:
+            "O macOS está verificando o acesso à captura de áudio."
+        case .granted:
+            "O Volume Mixer pode processar o áudio do sistema localmente."
+        case .required:
+            "Permita o Volume Mixer nos Ajustes do Sistema para ativar o mixer."
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .unknown: "questionmark.circle"
+        case .checking: "hourglass"
+        case .granted: "checkmark.shield.fill"
+        case .required: "exclamationmark.shield.fill"
+        }
+    }
+}
+
 struct RouteTarget: Equatable, Sendable {
     let id: String
     let processObjectIDs: [UInt32]

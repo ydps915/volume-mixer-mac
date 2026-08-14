@@ -12,6 +12,19 @@ final class AudioTapEngine: ObservableObject {
 
     private let controller = AudioRouteController()
 
+    func checkSystemAudioPermission(completion: @escaping @MainActor (Bool) -> Void) {
+        guard #available(macOS 14.2, *) else {
+            completion(false)
+            return
+        }
+
+        controller.requestSystemAudioPermission { granted in
+            Task { @MainActor in
+                completion(granted)
+            }
+        }
+    }
+
     func activate(completion: @escaping @MainActor (Bool) -> Void) {
         guard #available(macOS 14.2, *) else {
             setState(.unsupported)

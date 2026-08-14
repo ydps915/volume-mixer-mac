@@ -50,6 +50,8 @@ struct ContentView: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 14) {
+            SystemAudioPermissionPanel()
+
             if let message = store.engineState.message {
                 Label(message, systemImage: statusIcon)
                     .font(.callout)
@@ -59,11 +61,6 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
 
-                if case .permissionRequired = store.engineState {
-                    Button("Abrir Ajustes de Privacidade") {
-                        store.openSystemSettings()
-                    }
-                }
             }
 
             if let fallbackMessage = store.fallbackMessage {

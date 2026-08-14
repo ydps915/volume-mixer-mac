@@ -23,9 +23,7 @@ struct SettingsView: View {
 
             Section("Privacidade") {
                 Text("O Volume Mixer processa o áudio localmente, em tempo real. Nenhuma gravação é criada e nenhum áudio sai deste Mac.")
-                Button("Abrir Ajustes de Privacidade") {
-                    store.openSystemSettings()
-                }
+                SystemAudioPermissionPanel()
             }
 
             Section("Limitações do v1") {
