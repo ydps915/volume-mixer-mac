@@ -7,6 +7,7 @@ struct AppMixerRow: View {
 
     var body: some View {
         let preference = store.preference(for: session.bundleID)
+        let isFavorite = store.isFavorite(session.bundleID)
 
         HStack(spacing: 12) {
             AppIcon(bundleID: session.bundleID)
@@ -15,7 +16,7 @@ struct AppMixerRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(session.displayName)
                     .lineLimit(1)
-                Text(preference.isMuted ? "Silenciado" : "Áudio ativo")
+                Text(statusText(preference: preference))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -43,8 +44,23 @@ struct AppMixerRow: View {
             .buttonStyle(.borderless)
             .help(preference.isMuted ? "Ativar som" : "Silenciar")
             .accessibilityLabel(preference.isMuted ? "Ativar som de \(session.displayName)" : "Silenciar \(session.displayName)")
+
+            Button {
+                store.setFavorite(!isFavorite, for: session.bundleID)
+            } label: {
+                Image(systemName: isFavorite ? "star.fill" : "star")
+                    .foregroundStyle(isFavorite ? .yellow : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .help(isFavorite ? "Remover dos favoritos" : "Favoritar app")
+            .accessibilityLabel(isFavorite ? "Remover \(session.displayName) dos favoritos" : "Favoritar \(session.displayName)")
         }
         .padding(.vertical, 4)
+    }
+
+    private func statusText(preference: AppVolumePreference) -> String {
+        if preference.isMuted { return "Silenciado" }
+        return session.isOutputRunning ? "Áudio ativo" : "Favorito — sem áudio"
     }
 }
 

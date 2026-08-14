@@ -47,12 +47,15 @@ final class MixerModelsTests: XCTestCase {
             launchAtLogin: true
         )
         let preferences = ["com.example.Player": AppVolumePreference(volume: 0.25, isMuted: false)]
+        let favorites: Set<String> = ["com.example.Player"]
 
         repository.save(settings: settings)
         repository.save(appPreferences: preferences)
+        repository.save(favoriteBundleIDs: favorites)
 
         XCTAssertEqual(repository.loadSettings(), settings)
         XCTAssertEqual(repository.loadAppPreferences(), preferences)
+        XCTAssertEqual(repository.loadFavoriteBundleIDs(), favorites)
     }
 
     func testActivationRequiresSupportedMacOSAndPermission() {

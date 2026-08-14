@@ -106,14 +106,31 @@ struct ContentView: View {
     private var sessionList: some View {
         if store.sessions.isEmpty {
             ContentUnavailableView(
-                "Nenhum app com áudio ativo",
+                "Nenhum app para mostrar",
                 systemImage: "speaker.slash",
-                description: Text("Inicie um áudio em qualquer app para ele aparecer aqui.")
+                description: Text("Inicie um áudio em qualquer app ou favorite-o para mantê-lo nesta lista.")
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            List(store.sessions) { session in
-                AppMixerRow(session: session)
+            List {
+                let favorites = store.sessions.filter { store.isFavorite($0.bundleID) }
+                let nonFavorites = store.sessions.filter { !store.isFavorite($0.bundleID) }
+
+                if !favorites.isEmpty {
+                    Section("Favoritos") {
+                        ForEach(favorites) { session in
+                            AppMixerRow(session: session)
+                        }
+                    }
+                }
+
+                if !nonFavorites.isEmpty {
+                    Section("Com áudio ativo") {
+                        ForEach(nonFavorites) { session in
+                            AppMixerRow(session: session)
+                        }
+                    }
+                }
             }
             .listStyle(.inset)
         }

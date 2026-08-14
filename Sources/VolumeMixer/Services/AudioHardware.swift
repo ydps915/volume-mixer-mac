@@ -86,6 +86,21 @@ enum AudioHardware {
         return stringProperty(objectID: defaultDeviceID, selector: kAudioDevicePropertyDeviceUID)
     }
 
+    static func inactiveSession(forFavorite bundleID: String) -> MixerSession {
+        let applicationURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+        let displayName = applicationURL.map {
+            FileManager.default.displayName(atPath: $0.path)
+        } ?? bundleID
+
+        return MixerSession(
+            bundleID: bundleID,
+            displayName: displayName,
+            processObjectIDs: [],
+            processIDs: [],
+            isOutputRunning: false
+        )
+    }
+
     static func outputChannelCount(deviceUID: String) -> Int? {
         guard let deviceID = deviceID(forUID: deviceUID) else { return nil }
 

@@ -5,6 +5,7 @@ An open-source macOS volume mixer with individual controls for active apps.
 ## What it does
 
 - Per-app volume and mute controls.
+- Favorite an app to keep its control visible even when it is not playing audio.
 - A global master volume and one selected physical output.
 - Menu bar controls, a full window, remembered app preferences, and an optional login item.
 - Automatic fallback to the macOS default output when the selected device disappears.

@@ -15,6 +15,7 @@ final class MixerStore: ObservableObject {
     private let repository: MixerPreferencesRepository
     private let engine: AudioTapEngine
     private var appPreferences: [String: AppVolumePreference]
+    private var favoriteBundleIDs: Set<String>
     private var refreshTimer: Timer?
     private var hasStarted = false
 
@@ -25,6 +26,7 @@ final class MixerStore: ObservableObject {
         self.repository = repository
         self.settings = repository.loadSettings()
         self.appPreferences = repository.loadAppPreferences()
+        self.favoriteBundleIDs = repository.loadFavoriteBundleIDs()
         self.engine = engine
         self.engineState = engine.state
         engine.onStateChange = { [weak self] state in
@@ -49,7 +51,10 @@ final class MixerStore: ObservableObject {
 
     func refresh() {
         outputDevices = AudioHardware.outputDevices()
-        sessions = AudioHardware.activeSessions(excluding: Int32(ProcessInfo.processInfo.processIdentifier))
+        let activeSessions = AudioHardware.activeSessions(
+            excluding: Int32(ProcessInfo.processInfo.processIdentifier)
+        )
+        sessions = mergedSessions(with: activeSessions)
         resolveOutputFallback()
         reconcileAudioRoutes()
     }
@@ -116,6 +121,20 @@ final class MixerStore: ObservableObject {
         appPreferences[bundleID] ?? AppVolumePreference()
     }
 
+    func isFavorite(_ bundleID: String) -> Bool {
+        favoriteBundleIDs.contains(bundleID)
+    }
+
+    func setFavorite(_ isFavorite: Bool, for bundleID: String) {
+        if isFavorite {
+            favoriteBundleIDs.insert(bundleID)
+        } else {
+            favoriteBundleIDs.remove(bundleID)
+        }
+        repository.save(favoriteBundleIDs: favoriteBundleIDs)
+        refresh()
+    }
+
     func setLaunchAtLogin(_ enabled: Bool) {
         loginItemError = nil
         do {
@@ -164,6 +183,21 @@ final class MixerStore: ObservableObject {
             )
         }
         engine.reconcile(targets: targets, outputDeviceUID: resolvedOutputUID)
+    }
+
+    private func mergedSessions(with activeSessions: [MixerSession]) -> [MixerSession] {
+        let activeBundleIDs = Set(activeSessions.map(\.bundleID))
+        let inactiveFavorites = favoriteBundleIDs
+            .subtracting(activeBundleIDs)
+            .map(AudioHardware.inactiveSession(forFavorite:))
+
+        return (activeSessions + inactiveFavorites).sorted { lhs, rhs in
+            let lhsIsFavorite = isFavorite(lhs.bundleID)
+            let rhsIsFavorite = isFavorite(rhs.bundleID)
+            if lhsIsFavorite != rhsIsFavorite { return lhsIsFavorite }
+            if lhs.isOutputRunning != rhs.isOutputRunning { return lhs.isOutputRunning }
+            return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+        }
     }
 
     private func saveSettings() {

@@ -4,6 +4,7 @@ final class MixerPreferencesRepository {
     private enum Key {
         static let settings = "mixer.settings"
         static let appPreferences = "mixer.app-preferences"
+        static let favoriteBundleIDs = "mixer.favorite-bundle-ids"
     }
 
     private let defaults: UserDefaults
@@ -28,6 +29,14 @@ final class MixerPreferencesRepository {
 
     func save(appPreferences: [String: AppVolumePreference]) {
         encode(appPreferences, forKey: Key.appPreferences)
+    }
+
+    func loadFavoriteBundleIDs() -> Set<String> {
+        decode(Set<String>.self, forKey: Key.favoriteBundleIDs) ?? []
+    }
+
+    func save(favoriteBundleIDs: Set<String>) {
+        encode(favoriteBundleIDs, forKey: Key.favoriteBundleIDs)
     }
 
     private func decode<T: Decodable>(_ type: T.Type, forKey key: String) -> T? {
