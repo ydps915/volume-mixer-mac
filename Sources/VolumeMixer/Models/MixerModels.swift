@@ -180,6 +180,41 @@ struct RouteTarget: Equatable, Sendable {
     let gain: Float
 }
 
+/// Keeps a completed process tap ready for a short time after an app becomes
+/// silent. Recreating a tap when a player resumes is slower than reusing the
+/// still-valid Core Audio process object, and can briefly leak unmodified audio
+/// to the regular output.
+struct WarmRouteCache {
+    private struct Entry {
+        let session: MixerSession
+        let lastActiveAt: Date
+    }
+
+    private let retention: TimeInterval
+    private var entries: [String: Entry] = [:]
+
+    init(retention: TimeInterval) {
+        self.retention = max(retention, 0)
+    }
+
+    mutating func update(
+        activeSessions: [MixerSession],
+        now: Date = .now
+    ) -> [MixerSession] {
+        for session in activeSessions where !session.processObjectIDs.isEmpty {
+            entries[session.bundleID] = Entry(session: session, lastActiveAt: now)
+        }
+
+        entries = entries.filter { _, entry in
+            now.timeIntervalSince(entry.lastActiveAt) <= retention
+        }
+
+        return entries.values
+            .map(\.session)
+            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+}
+
 enum StreamSafetyPolicy {
     static func excludesFromMixerCapture(bundleID: String) -> Bool {
         let normalizedBundleID = bundleID.lowercased()

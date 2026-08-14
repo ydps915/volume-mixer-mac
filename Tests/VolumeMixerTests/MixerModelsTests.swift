@@ -41,6 +41,30 @@ final class MixerModelsTests: XCTestCase {
         XCTAssertFalse(StreamSafetyPolicy.excludesFromMixerCapture(bundleID: "com.google.Chrome"))
     }
 
+    func testWarmRouteCacheKeepsRecentlySilentProcessReady() {
+        let session = MixerSession(
+            bundleID: "com.example.Player",
+            displayName: "Player",
+            processObjectIDs: [42],
+            processIDs: [123],
+            isOutputRunning: true
+        )
+        let startedAt = Date(timeIntervalSinceReferenceDate: 100)
+        var cache = WarmRouteCache(retention: 20)
+
+        XCTAssertEqual(
+            cache.update(activeSessions: [session], now: startedAt),
+            [session]
+        )
+        XCTAssertEqual(
+            cache.update(activeSessions: [], now: startedAt.addingTimeInterval(19.9)),
+            [session]
+        )
+        XCTAssertTrue(
+            cache.update(activeSessions: [], now: startedAt.addingTimeInterval(20.1)).isEmpty
+        )
+    }
+
     func testHelperProcessesResolveToTheirOwningApp() {
         let chromeHelperURL = URL(fileURLWithPath:
             "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper (Renderer).app"

@@ -18,8 +18,19 @@ final class MixerStore: ObservableObject {
     private let engine: AudioTapEngine
     private var appPreferences: [String: AppVolumePreference]
     private var favoriteBundleIDs: Set<String>
+    private var warmRouteCache = WarmRouteCache(retention: 20)
+    private var warmRouteSessions: [MixerSession] = []
     private var refreshTimer: Timer?
+    private var eventRefreshPending = false
     private var hasStarted = false
+
+    private lazy var hardwareObserver: AudioHardwareObserver = {
+        let observer = AudioHardwareObserver()
+        observer.onChange = { [weak self] in
+            self?.scheduleEventRefresh()
+        }
+        return observer
+    }()
 
     init(
         repository: MixerPreferencesRepository = MixerPreferencesRepository(),
@@ -54,8 +65,11 @@ final class MixerStore: ObservableObject {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        hardwareObserver.start()
         refresh()
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
+        // Core Audio listeners perform the immediate refresh. This is only a
+        // recovery scan for a third-party device/process that misses an event.
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.refresh()
             }
@@ -71,6 +85,7 @@ final class MixerStore: ObservableObject {
         let activeSessions = AudioHardware.activeSessions(
             excluding: Int32(ProcessInfo.processInfo.processIdentifier)
         )
+        warmRouteSessions = warmRouteCache.update(activeSessions: activeSessions)
         sessions = mergedSessions(with: activeSessions)
         resolveOutputFallback()
         reconcileAudioRoutes()
@@ -219,7 +234,7 @@ final class MixerStore: ObservableObject {
 
     private func reconcileAudioRoutes() {
         let protectedBundleIDs = Set(
-            sessions
+            warmRouteSessions
                 .filter { isProtectedFromMixerCapture($0.bundleID) }
                 .map(\.bundleID)
         )
@@ -227,7 +242,7 @@ final class MixerStore: ObservableObject {
             appLevels = appLevels.filter { !protectedBundleIDs.contains($0.key) }
         }
 
-        let targets = sessions
+        let targets = warmRouteSessions
             .filter { !isProtectedFromMixerCapture($0.bundleID) }
             .map { session in
             RouteTarget(
@@ -251,6 +266,17 @@ final class MixerStore: ObservableObject {
             if lhsIsFavorite != rhsIsFavorite { return lhsIsFavorite }
             if lhs.isOutputRunning != rhs.isOutputRunning { return lhs.isOutputRunning }
             return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+        }
+    }
+
+    private func scheduleEventRefresh() {
+        guard hasStarted, !eventRefreshPending else { return }
+        eventRefreshPending = true
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.eventRefreshPending = false
+            self.refresh()
         }
     }
 

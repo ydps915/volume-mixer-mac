@@ -5,11 +5,18 @@ import Foundation
 enum AudioHardware {
     private static let systemObject = AudioObjectID(kAudioObjectSystemObject)
 
-    static func activeSessions(excluding currentPID: Int32) -> [MixerSession] {
-        let processIDs = audioObjectIDs(
+    /// Returns every Core Audio process object, including processes that are not
+    /// currently playing. `AudioHardwareObserver` uses this to subscribe before
+    /// a process starts its next audio stream.
+    static func processObjectIDs() -> [AudioObjectID] {
+        audioObjectIDs(
             objectID: systemObject,
             selector: kAudioHardwarePropertyProcessObjectList
         )
+    }
+
+    static func activeSessions(excluding currentPID: Int32) -> [MixerSession] {
+        let processIDs = processObjectIDs()
 
         var grouped: [String: (name: String, objects: [UInt32], pids: [Int32])] = [:]
 
