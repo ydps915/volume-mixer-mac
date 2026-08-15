@@ -23,16 +23,22 @@ struct SettingsView: View {
             }
 
             Section("Chamadas e streams") {
-                Toggle(
-                    "Proteger Discord em chamadas e streams",
-                    isOn: Binding(
-                        get: { store.settings.protectDiscordDuringStreams },
-                        set: { store.setDiscordStreamProtection($0) }
+                Picker(
+                    "Deixar o Discord fora do mixer",
+                    selection: Binding(
+                        get: { store.settings.discordProtection },
+                        set: { store.setDiscordProtection($0) }
                     )
-                )
-                .tint(.blue)
+                ) {
+                    ForEach(DiscordProtectionMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
 
-                Text("Quando ativo, o Volume Mixer não lê, silencia ou redireciona o áudio do Discord. Isso evita que a rota do mixer realimente compartilhamentos de tela. Desative apenas se quiser controlar o Discord pelo mixer.")
+                Text("Para mudar o volume de um app, o Volume Mixer precisa silenciá-lo e reproduzir o áudio dele. Quem passa a emitir o som é o Volume Mixer, e o compartilhamento de tela do Discord — que exclui apenas os processos do próprio Discord — não consegue excluir essa cópia. O resultado é eco: quem está na chamada se escuta.")
+                    .foregroundStyle(.secondary)
+
+                Text("Em “Durante chamadas e streams” o Discord sai do mixer só enquanto está capturando áudio, e você controla o volume dele no resto do tempo. Use “Nunca” apenas se você não compartilha tela com som.")
                     .foregroundStyle(.secondary)
             }
 

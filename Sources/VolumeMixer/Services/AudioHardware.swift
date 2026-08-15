@@ -15,48 +15,59 @@ enum AudioHardware {
         )
     }
 
-    static func activeSessions(excluding currentPID: Int32) -> [MixerSession] {
-        let processIDs = processObjectIDs()
+    /// Every app Core Audio knows about, grouped by canonical bundle ID, with
+    /// **all** of that app's process objects — not only the ones producing audio
+    /// right now.
+    ///
+    /// A tap has to cover the whole app. Building one from just the currently
+    /// playing helpers made Chromium and Electron apps rebuild their tap every
+    /// time a tab started or stopped audio, which is audible as a dropout, and
+    /// it left no route in place for an app that was about to start playing.
+    @MainActor
+    static func appSessions(excluding currentPID: Int32) -> [MixerSession] {
+        var grouped: [String: (
+            name: String,
+            objects: [UInt32],
+            pids: [Int32],
+            isRunning: Bool,
+            isCapturing: Bool
+        )] = [:]
 
-        var grouped: [String: (name: String, objects: [UInt32], pids: [Int32])] = [:]
-
-        for processObjectID in processIDs {
-            guard boolProperty(
-                objectID: processObjectID,
-                selector: kAudioProcessPropertyIsRunningOutput
-            ),
-            let processID = int32Property(
+        for processObjectID in processObjectIDs() {
+            guard let processID = int32Property(
                 objectID: processObjectID,
                 selector: kAudioProcessPropertyPID
-            ),
-            processID != currentPID else {
+            ), processID != currentPID else {
                 continue
             }
 
-            let application = NSRunningApplication(processIdentifier: pid_t(processID))
             let rawBundleID = stringProperty(
                 objectID: processObjectID,
                 selector: kAudioProcessPropertyBundleID
-            ) ?? application?.bundleIdentifier
+            )
 
-            guard let rawBundleID else {
+            // Some processes report no bundle ID, or an empty one. Accepting it
+            // produced a nameless row and persisted a junk "" preference.
+            guard let identity = identity(rawBundleID: rawBundleID, processID: processID) else {
                 continue
             }
+            guard identity.bundleID != Bundle.main.bundleIdentifier else { continue }
 
-            let bundleID = ProcessAppIdentity.canonicalBundleID(
-                rawBundleID: rawBundleID,
-                bundleURL: application?.bundleURL
+            let isRunning = boolProperty(
+                objectID: processObjectID,
+                selector: kAudioProcessPropertyIsRunningOutput
             )
-            guard bundleID != Bundle.main.bundleIdentifier else { continue }
+            let isCapturing = boolProperty(
+                objectID: processObjectID,
+                selector: kAudioProcessPropertyIsRunningInput
+            )
 
-            let displayName = ProcessAppIdentity.displayName(
-                rawBundleID: rawBundleID,
-                application: application
-            )
-            var entry = grouped[bundleID] ?? (displayName, [], [])
+            var entry = grouped[identity.bundleID] ?? (identity.displayName, [], [], false, false)
             entry.objects.append(processObjectID)
             entry.pids.append(processID)
-            grouped[bundleID] = entry
+            entry.isRunning = entry.isRunning || isRunning
+            entry.isCapturing = entry.isCapturing || isCapturing
+            grouped[identity.bundleID] = entry
         }
 
         return grouped
@@ -66,10 +77,45 @@ enum AudioHardware {
                     displayName: entry.name,
                     processObjectIDs: entry.objects.sorted(),
                     processIDs: entry.pids.sorted(),
-                    isOutputRunning: true
+                    isOutputRunning: entry.isRunning,
+                    isInputRunning: entry.isCapturing
                 )
             }
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+    }
+
+    /// Resolving a bundle ID and a display name means a Launch Services lookup,
+    /// which is far too expensive to repeat for every process on every scan.
+    @MainActor
+    private static var identityCache: [String: (bundleID: String, displayName: String)] = [:]
+
+    @MainActor
+    private static func identity(
+        rawBundleID: String?,
+        processID: Int32
+    ) -> (bundleID: String, displayName: String)? {
+        if let rawBundleID, let cached = identityCache[rawBundleID] {
+            return cached
+        }
+
+        let application = NSRunningApplication(processIdentifier: pid_t(processID))
+        guard let resolvedRawBundleID = rawBundleID ?? application?.bundleIdentifier,
+              !resolvedRawBundleID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+
+        let identity = (
+            bundleID: ProcessAppIdentity.canonicalBundleID(
+                rawBundleID: resolvedRawBundleID,
+                bundleURL: application?.bundleURL
+            ),
+            displayName: ProcessAppIdentity.displayName(
+                rawBundleID: resolvedRawBundleID,
+                application: application
+            )
+        )
+        identityCache[resolvedRawBundleID] = identity
+        return identity
     }
 
     static func outputDevices() -> [AudioOutputDevice] {

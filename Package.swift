@@ -17,9 +17,11 @@ let package = Package(
             name: "VolumeMixer",
             dependencies: ["AtomicGain"],
             path: "Sources/VolumeMixer",
-            resources: [
-                .copy("Resources/MenuBarIcon.png"),
-            ]
+            // No SPM `resources:` on purpose. The generated `Bundle.module`
+            // accessor falls back to an absolute build-directory path and traps
+            // when it is missing, so the menu-bar icon is staged into the app
+            // bundle by `script/build_and_run.sh` and read from `Bundle.main`.
+            exclude: ["Resources"]
         ),
         .testTarget(
             name: "VolumeMixerTests",

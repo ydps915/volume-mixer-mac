@@ -7,15 +7,20 @@ struct AppVolumePreference: Codable, Equatable, Sendable {
 
     init(volume: Double = 1, isMuted: Bool = false, boostEnabled: Bool = false) {
         self.boostEnabled = boostEnabled
-        self.volume = min(max(volume, 0), boostEnabled ? 2 : 1)
+        // Kept up to 200% even with boost off, so turning boost off and on again
+        // restores the level the user had set instead of silently losing it.
+        self.volume = min(max(volume, 0), 2)
         self.isMuted = isMuted
     }
 
     var maximumVolume: Double { boostEnabled ? 2 : 1 }
 
+    /// The volume actually in force, which is capped at 100% while boost is off.
+    var appliedVolume: Double { min(volume, maximumVolume) }
+
     func effectiveGain(masterVolume: Double) -> Float {
         guard !isMuted else { return 0 }
-        return Float(min(max(volume * masterVolume, 0), maximumVolume))
+        return Float(min(max(appliedVolume * masterVolume, 0), maximumVolume))
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -46,20 +51,20 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
     var preferredOutputUID: String?
     var mixerEnabled: Bool
     var launchAtLogin: Bool
-    var protectDiscordDuringStreams: Bool
+    var discordProtection: DiscordProtectionMode
 
     init(
         masterVolume: Double = 1,
         preferredOutputUID: String? = nil,
         mixerEnabled: Bool = false,
         launchAtLogin: Bool = false,
-        protectDiscordDuringStreams: Bool = true
+        discordProtection: DiscordProtectionMode = .duringCallsAndStreams
     ) {
         self.masterVolume = min(max(masterVolume, 0), 1)
         self.preferredOutputUID = preferredOutputUID
         self.mixerEnabled = mixerEnabled
         self.launchAtLogin = launchAtLogin
-        self.protectDiscordDuringStreams = protectDiscordDuringStreams
+        self.discordProtection = discordProtection
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -67,6 +72,7 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
         case preferredOutputUID
         case mixerEnabled
         case launchAtLogin
+        case discordProtection
         case protectDiscordDuringStreams
     }
 
@@ -77,11 +83,28 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
             preferredOutputUID: try container.decodeIfPresent(String.self, forKey: .preferredOutputUID),
             mixerEnabled: try container.decodeIfPresent(Bool.self, forKey: .mixerEnabled) ?? false,
             launchAtLogin: try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false,
-            protectDiscordDuringStreams: try container.decodeIfPresent(
-                Bool.self,
-                forKey: .protectDiscordDuringStreams
-            ) ?? true
+            discordProtection: try Self.decodeProtection(from: container)
         )
+    }
+
+    /// The setting used to be a Bool. `true` meant "never route Discord", which
+    /// maps to `.always`. `false` left the user exposed to the screen-share echo
+    /// this protection exists for, so it now becomes the automatic mode rather
+    /// than `.never`.
+    private static func decodeProtection(
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) throws -> DiscordProtectionMode {
+        if let mode = try container.decodeIfPresent(
+            DiscordProtectionMode.self,
+            forKey: .discordProtection
+        ) {
+            return mode
+        }
+        let legacyAlwaysProtect = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .protectDiscordDuringStreams
+        )
+        return legacyAlwaysProtect == true ? .always : .duringCallsAndStreams
     }
 
     func encode(to encoder: Encoder) throws {
@@ -90,7 +113,7 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
         try container.encodeIfPresent(preferredOutputUID, forKey: .preferredOutputUID)
         try container.encode(mixerEnabled, forKey: .mixerEnabled)
         try container.encode(launchAtLogin, forKey: .launchAtLogin)
-        try container.encode(protectDiscordDuringStreams, forKey: .protectDiscordDuringStreams)
+        try container.encode(discordProtection, forKey: .discordProtection)
     }
 }
 
@@ -100,8 +123,27 @@ struct MixerSession: Identifiable, Equatable, Sendable {
     let processObjectIDs: [UInt32]
     let processIDs: [Int32]
     let isOutputRunning: Bool
+    /// The app is capturing audio — a call, a recording, or a screen share with
+    /// sound. See `StreamSafetyPolicy`.
+    let isInputRunning: Bool
 
     var id: String { bundleID }
+
+    init(
+        bundleID: String,
+        displayName: String,
+        processObjectIDs: [UInt32],
+        processIDs: [Int32],
+        isOutputRunning: Bool,
+        isInputRunning: Bool = false
+    ) {
+        self.bundleID = bundleID
+        self.displayName = displayName
+        self.processObjectIDs = processObjectIDs
+        self.processIDs = processIDs
+        self.isOutputRunning = isOutputRunning
+        self.isInputRunning = isInputRunning
+    }
 }
 
 struct AudioOutputDevice: Identifiable, Equatable, Sendable {
@@ -176,51 +218,83 @@ enum SystemAudioPermissionState: Equatable, Sendable {
 
 struct RouteTarget: Equatable, Sendable {
     let id: String
+    let displayName: String
     let processObjectIDs: [UInt32]
     let gain: Float
 }
 
-/// Keeps a completed process tap ready for a short time after an app becomes
-/// silent. Recreating a tap when a player resumes is slower than reusing the
-/// still-valid Core Audio process object, and can briefly leak unmodified audio
-/// to the regular output.
+/// Keeps an app's route alive for a short time after it goes silent, so a
+/// player that is paused and resumed does not have to rebuild its tap — which
+/// is slow enough to briefly leak unmodified audio to the regular output.
+///
+/// Only bundle IDs are remembered. An earlier version cached the whole session,
+/// including its Core Audio process object IDs; those IDs get recycled, so a
+/// stale entry could build a tap over whatever process inherited the number.
+/// The caller now always pairs a remembered bundle ID with a freshly scanned
+/// process set.
 struct WarmRouteCache {
-    private struct Entry {
-        let session: MixerSession
-        let lastActiveAt: Date
-    }
-
     private let retention: TimeInterval
-    private var entries: [String: Entry] = [:]
+    private var lastActiveAt: [String: Date] = [:]
 
     init(retention: TimeInterval) {
         self.retention = max(retention, 0)
     }
 
     mutating func update(
-        activeSessions: [MixerSession],
+        activeBundleIDs: Set<String>,
         now: Date = .now
-    ) -> [MixerSession] {
-        for session in activeSessions where !session.processObjectIDs.isEmpty {
-            entries[session.bundleID] = Entry(session: session, lastActiveAt: now)
+    ) -> Set<String> {
+        for bundleID in activeBundleIDs {
+            lastActiveAt[bundleID] = now
         }
-
-        entries = entries.filter { _, entry in
-            now.timeIntervalSince(entry.lastActiveAt) <= retention
-        }
-
-        return entries.values
-            .map(\.session)
-            .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        lastActiveAt = lastActiveAt.filter { now.timeIntervalSince($0.value) <= retention }
+        return Set(lastActiveAt.keys)
     }
 }
 
+enum DiscordProtectionMode: String, Codable, CaseIterable, Sendable {
+    /// Leave Discord out of the mixer only while it is capturing audio, which is
+    /// what a call or a screen share with sound looks like from Core Audio.
+    case duringCallsAndStreams
+    /// Never route Discord through the mixer.
+    case always
+    /// Always route it; the user accepts the echo risk while sharing.
+    case never
+
+    var title: String {
+        switch self {
+        case .duringCallsAndStreams: "Durante chamadas e streams"
+        case .always: "Sempre"
+        case .never: "Nunca"
+        }
+    }
+}
+
+/// Why this exists: to change an app's volume the mixer has to mute that app and
+/// re-render its audio, which makes **Volume Mixer** the process emitting the
+/// sound. Discord's screen share captures every process except its own, so it
+/// cannot exclude that re-rendered copy — participants end up hearing
+/// themselves. There is no way to opt out of another app's capture, so the only
+/// fix is to leave Discord on its own route while it is capturing.
 enum StreamSafetyPolicy {
-    static func excludesFromMixerCapture(bundleID: String) -> Bool {
+    static func isStreamSensitive(bundleID: String) -> Bool {
         let normalizedBundleID = bundleID.lowercased()
         return normalizedBundleID.hasPrefix("com.hnc.discord")
             || normalizedBundleID.hasPrefix("com.discord.discord")
             || normalizedBundleID.hasPrefix("com.discordapp.discord")
+    }
+
+    static func excludesFromMixerCapture(
+        bundleID: String,
+        mode: DiscordProtectionMode,
+        isCapturingAudio: Bool
+    ) -> Bool {
+        guard isStreamSensitive(bundleID: bundleID) else { return false }
+        switch mode {
+        case .always: return true
+        case .never: return false
+        case .duringCallsAndStreams: return isCapturingAudio
+        }
     }
 }
 

@@ -13,9 +13,7 @@ struct ContentView: View {
             Divider()
             sessionList
         }
-        .task {
-            store.start()
-        }
+        .frame(minWidth: 560, minHeight: 460)
     }
 
     private var header: some View {
@@ -61,13 +59,13 @@ struct ContentView: View {
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-
             }
 
             if let fallbackMessage = store.fallbackMessage {
                 Label(fallbackMessage, systemImage: "exclamationmark.triangle.fill")
                     .font(.callout)
                     .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let routingIssue = store.routingIssue {
@@ -86,6 +84,12 @@ struct ContentView: View {
                         Text(device.isDefault ? "\(device.name) (padrão)" : device.name)
                             .tag(device.id)
                     }
+                    // A preferred device that has been unplugged still has to
+                    // have a matching tag, otherwise the picker renders blank
+                    // and looks broken.
+                    if let missingUID = unavailablePreferredUID {
+                        Text("Saída indisponível").tag(missingUID)
+                    }
                 }
                 .labelsHidden()
                 .frame(maxWidth: .infinity)
@@ -101,6 +105,7 @@ struct ContentView: View {
                     ),
                     in: 0...1
                 )
+                .accessibilityLabel("Volume mestre")
                 Text("\(Int((store.settings.masterVolume * 100).rounded()))%")
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
@@ -142,6 +147,11 @@ struct ContentView: View {
             }
             .listStyle(.inset)
         }
+    }
+
+    private var unavailablePreferredUID: String? {
+        guard let preferredUID = store.settings.preferredOutputUID else { return nil }
+        return store.outputDevices.contains(where: { $0.id == preferredUID }) ? nil : preferredUID
     }
 
     private var outputSelection: Binding<String> {

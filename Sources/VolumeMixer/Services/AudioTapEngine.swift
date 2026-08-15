@@ -1,3 +1,4 @@
+import Accelerate
 import AudioToolbox
 import AtomicGain
 import Combine
@@ -13,6 +14,9 @@ final class AudioTapEngine: ObservableObject {
     var onRoutingIssueChange: (@MainActor (String?) -> Void)?
 
     private let controller: AudioRouteController
+    /// Guards against an in-flight activation landing after the user switched
+    /// the mixer off again.
+    private var activationGeneration = 0
 
     init() {
         let controller = AudioRouteController()
@@ -44,10 +48,12 @@ final class AudioTapEngine: ObservableObject {
             return
         }
 
+        activationGeneration += 1
+        let generation = activationGeneration
         setState(.requestingPermission)
         controller.requestSystemAudioPermission { [weak self] granted in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, generation == self.activationGeneration else { return }
                 self.setState(granted ? .active : .permissionRequired)
                 completion(granted)
             }
@@ -64,6 +70,7 @@ final class AudioTapEngine: ObservableObject {
     }
 
     func stop() {
+        activationGeneration += 1
         controller.stopAll()
         setState(.inactive)
         onLevelsChange?([:])
@@ -82,8 +89,18 @@ private final class AudioRouteController: @unchecked Sendable {
         qos: .userInitiated
     )
     private var routes: [String: ProcessTapRoute] = [:]
+    /// Once an app has been attenuated it keeps its mixing route even when the
+    /// user returns it to exactly 100%. Rebuilding the tap on every crossing of
+    /// 1.0 tore the route down mid-drag, which is audible as a pop and a brief
+    /// jump back to full volume.
+    private var mixingTargetIDs: Set<String> = []
+    private var retryNotBefore: [String: Date] = [:]
+    private var heldLevels: [String: Float] = [:]
+    private var lastReconcileSummary: String?
     private var levelTimer: DispatchSourceTimer?
     var onLevels: (@Sendable ([String: Float]) -> Void)?
+
+    private static let retryCooldown: TimeInterval = 5
 
     func requestSystemAudioPermission(completion: @escaping @Sendable (Bool) -> Void) {
         queue.async {
@@ -119,6 +136,16 @@ private final class AudioRouteController: @unchecked Sendable {
             guard let self else { return }
             let error = self.apply(targets: targets, outputDeviceUID: outputDeviceUID)
             self.refreshLevelTimer()
+
+            // Reconciles run on every hardware event and every recovery scan, so
+            // only a change is worth a log line.
+            let summary = "targets=\(targets.count) routes=\(self.routes.count) issue=\(error ?? "none")"
+            if summary != self.lastReconcileSummary {
+                self.lastReconcileSummary = summary
+                AppLogger.audio.notice(
+                    "reconcile \(summary, privacy: .public) output=\(outputDeviceUID ?? "nil", privacy: .public)"
+                )
+            }
             completion(error)
         }
     }
@@ -128,6 +155,9 @@ private final class AudioRouteController: @unchecked Sendable {
             guard let self else { return }
             let existingRoutes = Array(self.routes.values)
             self.routes.removeAll()
+            self.mixingTargetIDs.removeAll()
+            self.retryNotBefore.removeAll()
+            self.heldLevels.removeAll()
             existingRoutes.forEach { $0.stop() }
             self.refreshLevelTimer()
         }
@@ -153,15 +183,30 @@ private final class AudioRouteController: @unchecked Sendable {
         for id in routes.keys where desired[id] == nil {
             retireRoute(id: id)
         }
+        // A target that is gone entirely starts fresh next time, back on the
+        // lighter monitoring path.
+        mixingTargetIDs.formIntersection(desired.keys)
+        retryNotBefore = retryNotBefore.filter { desired[$0.key] != nil }
 
-        var errors: [String] = []
+        let now = Date()
+        var failures: [RouteTarget] = []
+
         for (id, target) in desired {
-            let mode: ProcessTapRouteMode = isUnity(target.gain) ? .monitoring : .mixing
+            let needsMixing = !isUnity(target.gain) || mixingTargetIDs.contains(id)
+            let mode: ProcessTapRouteMode = needsMixing ? .mixing : .monitoring
+
             if let route = routes[id],
                route.processObjectIDs == target.processObjectIDs,
                route.outputDeviceUID == outputDeviceUID,
                route.mode == mode {
                 route.setGain(target.gain)
+                continue
+            }
+
+            // Do not hammer Core Audio with tap creation for a target that just
+            // failed; it retries on every hardware event and every rescan.
+            if let notBefore = retryNotBefore[id], now < notBefore {
+                if needsMixing { failures.append(target) }
                 continue
             }
 
@@ -172,25 +217,47 @@ private final class AudioRouteController: @unchecked Sendable {
                 gain: target.gain,
                 mode: mode
             ) else {
-                errors.append(id)
+                retryNotBefore[id] = now.addingTimeInterval(Self.retryCooldown)
+                // A failed monitoring route only costs a level meter, so it is
+                // not worth an error banner.
+                if needsMixing { failures.append(target) }
                 continue
             }
+
+            retryNotBefore.removeValue(forKey: id)
+            if needsMixing { mixingTargetIDs.insert(id) }
             routes[id] = route
         }
 
-        if errors.isEmpty { return nil }
-        return "Alguns apps não puderam ser roteados agora: \(errors.sorted().joined(separator: ", ")). O áudio deles continua na saída padrão e o mixer tentará novamente."
+        guard !failures.isEmpty else { return nil }
+        return Self.failureMessage(for: failures, outputDeviceUID: outputDeviceUID)
+    }
+
+    private static func failureMessage(
+        for failures: [RouteTarget],
+        outputDeviceUID: String
+    ) -> String {
+        let names = failures.map(\.displayName).sorted().joined(separator: ", ")
+        if AudioHardware.outputChannelCount(deviceUID: outputDeviceUID) != 2 {
+            return "A saída selecionada não é estéreo. Esta versão só ajusta o volume por app em saídas estéreo, então \(names) continua na saída padrão."
+        }
+        return "Não foi possível ajustar agora: \(names). O áudio continua na saída padrão e o mixer tentará de novo."
     }
 
     private func retireRoute(id: String) {
         guard let route = routes.removeValue(forKey: id) else { return }
-        route.setGain(1)
+        // Deliberately no gain reset here: restoring unity on a route that is
+        // about to be destroyed made a muted app blast one buffer at full
+        // volume before the tap went away.
         route.stop()
+        heldLevels.removeValue(forKey: id)
     }
 
     private func stopRoutes() {
         let existingRoutes = Array(routes.values)
         routes.removeAll()
+        mixingTargetIDs.removeAll()
+        heldLevels.removeAll()
         existingRoutes.forEach { $0.stop() }
     }
 
@@ -198,13 +265,14 @@ private final class AudioRouteController: @unchecked Sendable {
         guard !routes.isEmpty else {
             levelTimer?.cancel()
             levelTimer = nil
+            heldLevels.removeAll()
             onLevels?([:])
             return
         }
 
         guard levelTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(80))
+        timer.schedule(deadline: .now(), repeating: .milliseconds(80), leeway: .milliseconds(20))
         timer.setEventHandler { [weak self] in
             self?.publishLevels()
         }
@@ -212,10 +280,16 @@ private final class AudioRouteController: @unchecked Sendable {
         timer.resume()
     }
 
+    /// Peak hold lives here rather than in the route so that draining a peak is
+    /// a single atomic exchange, with no read-modify-write racing the render
+    /// thread.
     private func publishLevels() {
-        let levels = routes.reduce(into: [String: Float]()) { result, route in
-            result[route.key] = route.value.consumeLevel()
+        var levels: [String: Float] = [:]
+        for (id, route) in routes {
+            let peak = route.consumeLevel()
+            levels[id] = max(peak, (heldLevels[id] ?? 0) * 0.72)
         }
+        heldLevels = levels
         onLevels?(levels)
     }
 
@@ -225,7 +299,11 @@ private final class AudioRouteController: @unchecked Sendable {
 }
 
 private enum ProcessTapRouteMode: Equatable, Sendable {
+    /// Meter only. The app keeps playing through the normal system route and the
+    /// aggregate device carries no output sub-device, so it cannot disturb the
+    /// physical output.
     case monitoring
+    /// The app is muted at the system level and this route renders its audio.
     case mixing
 }
 
@@ -247,10 +325,17 @@ private final class ProcessTapRoute: @unchecked Sendable {
         gain: Float,
         mode: ProcessTapRouteMode
     ) {
-        guard #available(macOS 14.2, *),
-              !processObjectIDs.isEmpty,
-              AudioHardware.outputChannelCount(deviceUID: outputDeviceUID) == 2 else {
-            return nil
+        guard #available(macOS 14.2, *), !processObjectIDs.isEmpty else { return nil }
+        // Only a mixing route writes to the device, so only it needs a stereo
+        // output. Metering works on any output.
+        if mode == .mixing {
+            let channels = AudioHardware.outputChannelCount(deviceUID: outputDeviceUID)
+            guard channels == 2 else {
+                AppLogger.audio.error(
+                    "Route rejected: output \(outputDeviceUID, privacy: .public) has \(channels ?? -1, privacy: .public) channels"
+                )
+                return nil
+            }
         }
 
         self.processObjectIDs = processObjectIDs
@@ -263,41 +348,48 @@ private final class ProcessTapRoute: @unchecked Sendable {
         description.isPrivate = true
         description.muteBehavior = mode == .mixing ? .mutedWhenTapped : .unmuted
 
-        guard AudioHardwareCreateProcessTap(description, &tapID) == noErr,
-              tapID != kAudioObjectUnknown,
-              let format = AudioHardware.tapFormat(tapID: tapID),
-              Self.supports(format: format) else {
-            cleanUpFailedStart()
+        let tapStatus = AudioHardwareCreateProcessTap(description, &tapID)
+        guard tapStatus == noErr, tapID != kAudioObjectUnknown else {
+            AppLogger.audio.error("Tap creation failed: \(tapStatus, privacy: .public)")
+            stop()
+            return nil
+        }
+        guard let format = AudioHardware.tapFormat(tapID: tapID), Self.supports(format: format) else {
+            AppLogger.audio.error("Unsupported tap format for \(processObjectIDs, privacy: .public)")
+            stop()
             return nil
         }
 
-        let aggregateDescription: [String: Any] = [
-            kAudioAggregateDeviceNameKey: "Volume Mixer Route",
-            kAudioAggregateDeviceUIDKey: "com.ydps915.VolumeMixer.route.\(UUID().uuidString)",
-            kAudioAggregateDeviceIsPrivateKey: true,
-            kAudioAggregateDeviceMainSubDeviceKey: outputDeviceUID,
-            kAudioAggregateDeviceSubDeviceListKey: [
-                [kAudioSubDeviceUIDKey: outputDeviceUID],
-            ],
-            kAudioAggregateDeviceTapListKey: [
-                [
-                    kAudioSubTapUIDKey: description.uuid.uuidString,
-                    kAudioSubTapDriftCompensationKey: true,
-                ],
-            ],
-            kAudioAggregateDeviceTapAutoStartKey: true,
-        ]
-
-        guard AudioHardwareCreateAggregateDevice(
-            aggregateDescription as CFDictionary,
-            &aggregateDeviceID
-        ) == noErr, aggregateDeviceID != kAudioObjectUnknown else {
-            cleanUpFailedStart()
-            return nil
+        if mode == .mixing {
+            guard Self.createAggregateDevice(
+                tapUID: description.uuid.uuidString,
+                outputDeviceUID: outputDeviceUID,
+                into: &aggregateDeviceID
+            ) else {
+                stop()
+                return nil
+            }
+        } else {
+            // Prefer a tap-only device. Fall back to attaching the output so a
+            // host that rejects a sub-device-less aggregate still gets a meter.
+            let created = Self.createAggregateDevice(
+                tapUID: description.uuid.uuidString,
+                outputDeviceUID: nil,
+                into: &aggregateDeviceID
+            ) || Self.createAggregateDevice(
+                tapUID: description.uuid.uuidString,
+                outputDeviceUID: outputDeviceUID,
+                into: &aggregateDeviceID
+            )
+            guard created else {
+                stop()
+                return nil
+            }
         }
 
         let gainState = gainState
         let levelState = levelState
+        let shouldWriteOutput = mode == .mixing
         guard AudioDeviceCreateIOProcIDWithBlock(
             &ioProcID,
             aggregateDeviceID,
@@ -309,30 +401,74 @@ private final class ProcessTapRoute: @unchecked Sendable {
                     format: format,
                     gain: gainState.load(),
                     levelState: levelState,
-                    shouldWriteOutput: mode == .mixing
+                    shouldWriteOutput: shouldWriteOutput
                 )
             }
         ) == noErr, let ioProcID else {
-            cleanUpFailedStart()
+            AppLogger.audio.error("IOProc creation failed for aggregate \(self.aggregateDeviceID, privacy: .public)")
+            stop()
             return nil
         }
 
-        guard AudioDeviceStart(aggregateDeviceID, ioProcID) == noErr else {
-            cleanUpFailedStart()
+        let startStatus = AudioDeviceStart(aggregateDeviceID, ioProcID)
+        guard startStatus == noErr else {
+            AppLogger.audio.error("AudioDeviceStart failed: \(startStatus, privacy: .public)")
+            stop()
             return nil
         }
         isRunning = true
+    }
+
+    @available(macOS 14.2, *)
+    private static func createAggregateDevice(
+        tapUID: String,
+        outputDeviceUID: String?,
+        into aggregateDeviceID: inout AudioObjectID
+    ) -> Bool {
+        var aggregateDescription: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "Volume Mixer Route",
+            kAudioAggregateDeviceUIDKey: "com.ydps915.VolumeMixer.route.\(UUID().uuidString)",
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceTapListKey: [
+                [
+                    kAudioSubTapUIDKey: tapUID,
+                    kAudioSubTapDriftCompensationKey: true,
+                ],
+            ],
+            kAudioAggregateDeviceTapAutoStartKey: true,
+        ]
+
+        if let outputDeviceUID {
+            aggregateDescription[kAudioAggregateDeviceMainSubDeviceKey] = outputDeviceUID
+            aggregateDescription[kAudioAggregateDeviceSubDeviceListKey] = [
+                [kAudioSubDeviceUIDKey: outputDeviceUID],
+            ]
+        } else {
+            // Tap-only: the tap provides the clock. A metering route used to
+            // attach the physical output too, which meant every app playing at
+            // 100% added another aggregate device driving the real output.
+            aggregateDescription[kAudioAggregateDeviceSubDeviceListKey] = [[String: Any]]()
+        }
+
+        let status = AudioHardwareCreateAggregateDevice(
+            aggregateDescription as CFDictionary,
+            &aggregateDeviceID
+        )
+        guard status == noErr, aggregateDeviceID != kAudioObjectUnknown else {
+            AppLogger.audio.error("Aggregate device creation failed: \(status, privacy: .public)")
+            aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
+            return false
+        }
+        return true
     }
 
     func setGain(_ gain: Float) {
         gainState.store(gain)
     }
 
+    /// Drains the peak accumulated since the last call.
     func consumeLevel() -> Float {
-        let current = min(max(levelState.load(), 0), 1)
-        // Keep the peak long enough for the UI to be readable between audio callbacks.
-        levelState.store(current * 0.84)
-        return current
+        min(max(levelState.exchange(0), 0), 1)
     }
 
     func stop() {
@@ -362,10 +498,6 @@ private final class ProcessTapRoute: @unchecked Sendable {
         stop()
     }
 
-    private func cleanUpFailedStart() {
-        stop()
-    }
-
     private static func supports(format: AudioStreamBasicDescription) -> Bool {
         guard format.mFormatID == kAudioFormatLinearPCM, format.mBytesPerFrame > 0 else {
             return false
@@ -386,43 +518,60 @@ private final class ProcessTapRoute: @unchecked Sendable {
         levelState: RealtimeGain,
         shouldWriteOutput: Bool
     ) {
-        levelState.store(peakLevel(inputData: inputData, format: format) * min(gain, 1))
-        guard shouldWriteOutput else { return }
-
         let inputs = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: inputData)
         )
         let outputs = UnsafeMutableAudioBufferListPointer(outputData)
 
-        for index in inputs.indices where index < outputs.count {
-            var output = outputs[index]
-            write(input: inputs[index], output: &output, format: format, gain: gain)
-            outputs[index] = output
+        // Report what the user actually hears, so a boosted app reads hot and a
+        // clipping one reaches the top of the meter.
+        let peak = peakLevel(inputs: inputs, format: format)
+        levelState.storeMax(min(peak * gain, 1))
+
+        guard shouldWriteOutput else {
+            // An untouched output buffer is not guaranteed to be silent.
+            for index in outputs.indices {
+                silence(outputs[index])
+            }
+            return
+        }
+
+        for index in outputs.indices {
+            if index < inputs.count {
+                write(input: inputs[index], output: outputs[index], format: format, gain: gain)
+            } else {
+                silence(outputs[index])
+            }
         }
     }
 
+    private static func silence(_ buffer: AudioBuffer) {
+        guard let data = buffer.mData, buffer.mDataByteSize > 0 else { return }
+        memset(data, 0, Int(buffer.mDataByteSize))
+    }
+
     private static func peakLevel(
-        inputData: UnsafePointer<AudioBufferList>,
+        inputs: UnsafeMutableAudioBufferListPointer,
         format: AudioStreamBasicDescription
     ) -> Float {
-        let buffers = UnsafeMutableAudioBufferListPointer(
-            UnsafeMutablePointer(mutating: inputData)
-        )
         let flags = format.mFormatFlags
         var peak: Float = 0
 
-        for buffer in buffers {
-            guard let data = buffer.mData else { continue }
+        for buffer in inputs {
+            guard let data = buffer.mData, buffer.mDataByteSize > 0 else { continue }
+
             if flags & kAudioFormatFlagIsFloat != 0, format.mBitsPerChannel == 32 {
-                let values = data.assumingMemoryBound(to: Float.self)
-                for index in 0..<(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size) {
-                    peak = max(peak, abs(values[index]))
-                }
+                let count = vDSP_Length(Int(buffer.mDataByteSize) / MemoryLayout<Float>.size)
+                guard count > 0 else { continue }
+                var bufferPeak: Float = 0
+                vDSP_maxmgv(data.assumingMemoryBound(to: Float.self), 1, &bufferPeak, count)
+                peak = max(peak, bufferPeak)
             } else if flags & kAudioFormatFlagIsFloat != 0, format.mBitsPerChannel == 64 {
-                let values = data.assumingMemoryBound(to: Double.self)
-                for index in 0..<(Int(buffer.mDataByteSize) / MemoryLayout<Double>.size) {
-                    peak = max(peak, Float(abs(values[index])))
-                }
+                let count = vDSP_Length(Int(buffer.mDataByteSize) / MemoryLayout<Double>.size)
+                guard count > 0 else { continue }
+                var bufferPeak: Double = 0
+                vDSP_maxmgvD(data.assumingMemoryBound(to: Double.self), 1, &bufferPeak, count)
+                peak = max(peak, Float(bufferPeak))
             } else if format.mBitsPerChannel == 16 {
                 let values = data.assumingMemoryBound(to: Int16.self)
                 for index in 0..<(Int(buffer.mDataByteSize) / MemoryLayout<Int16>.size) {
@@ -440,14 +589,16 @@ private final class ProcessTapRoute: @unchecked Sendable {
 
     private static func write(
         input: AudioBuffer,
-        output: inout AudioBuffer,
+        output: AudioBuffer,
         format: AudioStreamBasicDescription,
         gain: Float
     ) {
         guard let source = input.mData, let destination = output.mData else { return }
         let byteCount = min(input.mDataByteSize, output.mDataByteSize)
-        guard byteCount > 0 else { return }
-        output.mDataByteSize = byteCount
+        guard byteCount > 0 else {
+            silence(output)
+            return
+        }
 
         let flags = format.mFormatFlags
         if flags & kAudioFormatFlagIsFloat != 0, format.mBitsPerChannel == 32 {
@@ -459,6 +610,12 @@ private final class ProcessTapRoute: @unchecked Sendable {
         } else if format.mBitsPerChannel == 32 {
             scaleInt32(source: source, destination: destination, byteCount: byteCount, gain: gain)
         }
+
+        // The tap can deliver a shorter buffer than the device asked for; the
+        // tail would otherwise replay whatever was left in it.
+        if byteCount < output.mDataByteSize {
+            memset(destination.advanced(by: Int(byteCount)), 0, Int(output.mDataByteSize - byteCount))
+        }
     }
 
     private static func scaleFloat32(
@@ -467,11 +624,16 @@ private final class ProcessTapRoute: @unchecked Sendable {
         byteCount: UInt32,
         gain: Float
     ) {
-        let input = source.assumingMemoryBound(to: Float.self)
-        let output = destination.assumingMemoryBound(to: Float.self)
-        for index in 0..<(Int(byteCount) / MemoryLayout<Float>.size) {
-            output[index] = input[index] * gain
-        }
+        var gain = gain
+        let count = vDSP_Length(Int(byteCount) / MemoryLayout<Float>.size)
+        vDSP_vsmul(
+            source.assumingMemoryBound(to: Float.self),
+            1,
+            &gain,
+            destination.assumingMemoryBound(to: Float.self),
+            1,
+            count
+        )
     }
 
     private static func scaleFloat64(
@@ -480,11 +642,16 @@ private final class ProcessTapRoute: @unchecked Sendable {
         byteCount: UInt32,
         gain: Float
     ) {
-        let input = source.assumingMemoryBound(to: Double.self)
-        let output = destination.assumingMemoryBound(to: Double.self)
-        for index in 0..<(Int(byteCount) / MemoryLayout<Double>.size) {
-            output[index] = input[index] * Double(gain)
-        }
+        var gain = Double(gain)
+        let count = vDSP_Length(Int(byteCount) / MemoryLayout<Double>.size)
+        vDSP_vsmulD(
+            source.assumingMemoryBound(to: Double.self),
+            1,
+            &gain,
+            destination.assumingMemoryBound(to: Double.self),
+            1,
+            count
+        )
     }
 
     private static func scaleInt16(
@@ -523,6 +690,14 @@ private final class RealtimeGain: @unchecked Sendable {
 
     func store(_ value: Float) {
         VMAtomicGainStore(storage, Self.clamped(value))
+    }
+
+    func storeMax(_ value: Float) {
+        VMAtomicGainStoreMax(storage, Self.clamped(value))
+    }
+
+    func exchange(_ newValue: Float) -> Float {
+        VMAtomicGainExchange(storage, Self.clamped(newValue))
     }
 
     func load() -> Float {
