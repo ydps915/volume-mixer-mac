@@ -136,7 +136,11 @@ struct AudioLevelMeter: View {
 
     /// Audio amplitude is logarithmic to the ear. A -54 dB to 0 dB display range
     /// keeps normal listening levels visible without masking silence.
-    static func visualLevel(_ level: Double) -> Double {
+    ///
+    /// `nonisolated` because `View` conformance isolates the type to the main
+    /// actor on some toolchains, which would otherwise make this pure function
+    /// unreachable from tests.
+    nonisolated static func visualLevel(_ level: Double) -> Double {
         let clampedLevel = min(max(level, 0), 1)
         guard clampedLevel > 0.0005 else { return 0 }
         let decibels = 20 * log10(clampedLevel)
