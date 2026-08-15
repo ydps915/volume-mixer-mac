@@ -7,6 +7,7 @@ set -euo pipefail
 #
 # Environment:
 #   VOLUME_MIXER_CONFIGURATION  swift build configuration (default: release)
+#   VOLUME_MIXER_UNIVERSAL      1 to build arm64 + x86_64 (default: host only)
 #   CODESIGN_IDENTITY           signing identity (default: "-", ad-hoc)
 #   MARKETING_VERSION           overrides CFBundleShortVersionString
 #   BUILD_VERSION               overrides CFBundleVersion
@@ -23,8 +24,18 @@ CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
 cd "$ROOT_DIR"
 
-swift build -c "$CONFIGURATION"
-BUILD_BINARY="$(swift build -c "$CONFIGURATION" --show-bin-path)/$EXECUTABLE_NAME"
+# Released builds are universal: the CI runners are Apple Silicon, so a plain
+# `swift build` produces an arm64-only binary that Intel Macs cannot launch.
+ARCH_FLAGS=""
+if [ "${VOLUME_MIXER_UNIVERSAL:-0}" = "1" ]; then
+  ARCH_FLAGS="--arch arm64 --arch x86_64"
+fi
+
+# Unquoted on purpose: word splitting is how the flags reach swift build.
+# shellcheck disable=SC2086
+swift build -c "$CONFIGURATION" $ARCH_FLAGS
+# shellcheck disable=SC2086
+BUILD_BINARY="$(swift build -c "$CONFIGURATION" $ARCH_FLAGS --show-bin-path)/$EXECUTABLE_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"

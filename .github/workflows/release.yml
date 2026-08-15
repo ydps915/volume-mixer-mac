@@ -35,7 +35,13 @@ jobs:
         env:
           MARKETING_VERSION: ${{ steps.version.outputs.version }}
           BUILD_VERSION: ${{ github.run_number }}
+          VOLUME_MIXER_UNIVERSAL: "1"
         run: ./script/package_app.sh
+
+      - name: Verify the binary is universal
+        run: |
+          lipo -archs "dist/Volume Mixer.app/Contents/MacOS/VolumeMixer" | tee /tmp/archs
+          grep -q arm64 /tmp/archs && grep -q x86_64 /tmp/archs
 
       # ditto keeps the bundle's symlinks, resource forks and code signature
       # intact; a plain `zip` does not.
@@ -69,4 +75,4 @@ jobs:
                volume por app. O áudio é processado localmente e nada é gravado.
 
             Requer **macOS 14.2 ou posterior** e uma saída estéreo para os apps
-            que você ajustar.
+            que você ajustar. O binário é universal (Apple Silicon e Intel).
