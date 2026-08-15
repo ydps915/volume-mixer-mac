@@ -6,23 +6,36 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXECUTABLE_NAME="VolumeMixer"
 DISPLAY_NAME="Volume Mixer"
 BUNDLE_ID="com.ydps915.VolumeMixer"
-DIST_DIR="$ROOT_DIR/dist"
-APP_BUNDLE="$DIST_DIR/$DISPLAY_NAME.app"
+APP_BUNDLE="$ROOT_DIR/dist/$DISPLAY_NAME.app"
 APP_BINARY="$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
+
+# The audio DSP runs in the render callback, so ship an optimized build.
+# Override with VOLUME_MIXER_CONFIGURATION=debug when you need symbols.
+case "$MODE" in
+  --debug|debug) export VOLUME_MIXER_CONFIGURATION="${VOLUME_MIXER_CONFIGURATION:-debug}" ;;
+  *)             export VOLUME_MIXER_CONFIGURATION="${VOLUME_MIXER_CONFIGURATION:-release}" ;;
+esac
+
+# An ad-hoc signature ("-") pins the app's cdhash, so macOS treats every rebuild
+# as a different app and the System Audio Recording permission has to be granted
+# again. Set CODESIGN_IDENTITY to a self-signed or Developer ID identity to keep
+# the grant across builds:
+#   CODESIGN_IDENTITY="Volume Mixer Dev" ./script/build_and_run.sh
+export CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+
+cd "$ROOT_DIR"
+
+# Compile before stopping the running copy. Killing first meant a failed build
+# left the user with no mixer at all, and every app snapped back to full volume.
+swift build -c "$VOLUME_MIXER_CONFIGURATION"
 
 pkill -x "$EXECUTABLE_NAME" >/dev/null 2>&1 || true
 
-cd "$ROOT_DIR"
-swift build
-BUILD_BINARY="$(swift build --show-bin-path)/$EXECUTABLE_NAME"
+"$ROOT_DIR/script/package_app.sh" >/dev/null
 
-rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-cp "$BUILD_BINARY" "$APP_BINARY"
-cp "$ROOT_DIR/AppBundle/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
-cp "$ROOT_DIR/AppBundle/Assets/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-chmod +x "$APP_BINARY"
-codesign --force --sign - "$APP_BUNDLE" >/dev/null
+if [ "$CODESIGN_IDENTITY" = "-" ]; then
+  echo "note: ad-hoc signed; macOS may ask for System Audio Recording again." >&2
+fi
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"

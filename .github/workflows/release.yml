@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, e.g. 0.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: swift test
+
+      - name: Build app bundle
+        env:
+          MARKETING_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_VERSION: ${{ github.run_number }}
+        run: ./script/package_app.sh
+
+      # ditto keeps the bundle's symlinks, resource forks and code signature
+      # intact; a plain `zip` does not.
+      - name: Compress
+        run: |
+          cd dist
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "Volume Mixer.app" \
+            "VolumeMixer-${{ steps.version.outputs.version }}.zip"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Volume Mixer ${{ steps.version.outputs.version }}
+          tag_name: v${{ steps.version.outputs.version }}
+          files: dist/VolumeMixer-${{ steps.version.outputs.version }}.zip
+          generate_release_notes: true
+          body: |
+            ## Instalação
+
+            1. Baixe o `.zip` abaixo e descompacte.
+            2. Arraste **Volume Mixer.app** para a pasta **Aplicativos**.
+            3. O app é assinado ad-hoc, não pela Apple, então o macOS bloqueia a
+               primeira abertura. Rode uma vez no Terminal:
+
+               ```bash
+               xattr -dr com.apple.quarantine "/Applications/Volume Mixer.app"
+               ```
+
+            4. Abra o app e ligue **Mixer ativo**. O macOS vai pedir a permissão
+               de **Gravação de Áudio do Sistema** — é ela que permite ajustar o
+               volume por app. O áudio é processado localmente e nada é gravado.
+
+            Requer **macOS 14.2 ou posterior** e uma saída estéreo para os apps
+            que você ajustar.
