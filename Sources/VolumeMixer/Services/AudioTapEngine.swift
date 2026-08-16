@@ -200,6 +200,7 @@ private final class AudioRouteController: @unchecked Sendable {
                route.outputDeviceUID == outputDeviceUID,
                route.mode == mode {
                 route.setGain(target.gain)
+                route.setLimitsPeaks(target.limitPeaks)
                 continue
             }
 
@@ -215,6 +216,7 @@ private final class AudioRouteController: @unchecked Sendable {
                 processObjectIDs: target.processObjectIDs,
                 outputDeviceUID: outputDeviceUID,
                 gain: target.gain,
+                limitPeaks: target.limitPeaks,
                 mode: mode
             ) else {
                 retryNotBefore[id] = now.addingTimeInterval(Self.retryCooldown)
@@ -314,6 +316,11 @@ private final class ProcessTapRoute: @unchecked Sendable {
 
     private let gainState: RealtimeGain
     private let levelState = RealtimeGain(initialValue: 0)
+    /// 0 or 1. An atomic flag so the setting can be toggled without rebuilding
+    /// the tap, which would be audible.
+    private let limitPeaksState: RealtimeGain
+    /// Only ever touched from the render callback, so a plain reference is fine.
+    private let limiterState = LimiterState()
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
@@ -323,8 +330,10 @@ private final class ProcessTapRoute: @unchecked Sendable {
         processObjectIDs: [UInt32],
         outputDeviceUID: String,
         gain: Float,
+        limitPeaks: Bool,
         mode: ProcessTapRouteMode
     ) {
+        self.limitPeaksState = RealtimeGain(initialValue: limitPeaks ? 1 : 0)
         guard #available(macOS 14.2, *), !processObjectIDs.isEmpty else { return nil }
         // Only a mixing route writes to the device, so only it needs a stereo
         // output. Metering works on any output.
@@ -389,6 +398,8 @@ private final class ProcessTapRoute: @unchecked Sendable {
 
         let gainState = gainState
         let levelState = levelState
+        let limitPeaksState = limitPeaksState
+        let limiterState = limiterState
         let shouldWriteOutput = mode == .mixing
         guard AudioDeviceCreateIOProcIDWithBlock(
             &ioProcID,
@@ -400,6 +411,8 @@ private final class ProcessTapRoute: @unchecked Sendable {
                     outputData: outputData,
                     format: format,
                     gain: gainState.load(),
+                    limitsPeaks: limitPeaksState.load() > 0.5,
+                    limiterState: limiterState,
                     levelState: levelState,
                     shouldWriteOutput: shouldWriteOutput
                 )
@@ -466,6 +479,10 @@ private final class ProcessTapRoute: @unchecked Sendable {
         gainState.store(gain)
     }
 
+    func setLimitsPeaks(_ limitPeaks: Bool) {
+        limitPeaksState.store(limitPeaks ? 1 : 0)
+    }
+
     /// Drains the peak accumulated since the last call.
     func consumeLevel() -> Float {
         min(max(levelState.exchange(0), 0), 1)
@@ -515,6 +532,8 @@ private final class ProcessTapRoute: @unchecked Sendable {
         outputData: UnsafeMutablePointer<AudioBufferList>,
         format: AudioStreamBasicDescription,
         gain: Float,
+        limitsPeaks: Bool,
+        limiterState: LimiterState,
         levelState: RealtimeGain,
         shouldWriteOutput: Bool
     ) {
@@ -523,26 +542,68 @@ private final class ProcessTapRoute: @unchecked Sendable {
         )
         let outputs = UnsafeMutableAudioBufferListPointer(outputData)
 
-        // Report what the user actually hears, so a boosted app reads hot and a
-        // clipping one reaches the top of the meter.
         let peak = peakLevel(inputs: inputs, format: format)
-        levelState.storeMax(min(peak * gain, 1))
+
+        var targetGain = gain
+        if limitsPeaks {
+            targetGain = limiterState.limiter.nextGain(
+                inputPeak: peak,
+                gain: gain,
+                bufferDuration: bufferDuration(inputs: inputs, format: format)
+            )
+        } else {
+            limiterState.limiter = PeakLimiter()
+        }
+
+        // Report what the user actually hears, so the meter shows the limiter
+        // holding the level rather than pinning red.
+        levelState.storeMax(min(peak * targetGain, 1))
 
         guard shouldWriteOutput else {
             // An untouched output buffer is not guaranteed to be silent.
             for index in outputs.indices {
                 silence(outputs[index])
             }
+            limiterState.appliedGain = targetGain
             return
         }
 
+        // Ramp from the gain the previous buffer ended on, so the limiter moving
+        // is not audible as a click at the buffer boundary.
+        //
+        // Except when attacking: ramping *down* would apply the older, higher
+        // gain to the very samples that triggered the reduction, letting the
+        // transient clip. Dropping straight to the new gain is inaudible under a
+        // loud passage, whereas the clipping it prevents is not.
+        let startGain = min(limiterState.appliedGain, targetGain)
+        limiterState.appliedGain = targetGain
+
         for index in outputs.indices {
             if index < inputs.count {
-                write(input: inputs[index], output: outputs[index], format: format, gain: gain)
+                write(
+                    input: inputs[index],
+                    output: outputs[index],
+                    format: format,
+                    startGain: startGain,
+                    endGain: targetGain
+                )
             } else {
                 silence(outputs[index])
             }
         }
+    }
+
+    private static func bufferDuration(
+        inputs: UnsafeMutableAudioBufferListPointer,
+        format: AudioStreamBasicDescription
+    ) -> Float {
+        guard format.mSampleRate > 0,
+              format.mBytesPerFrame > 0,
+              let first = inputs.first else {
+            return 0.01
+        }
+        let frames = Float(first.mDataByteSize) / Float(format.mBytesPerFrame)
+        return frames / Float(format.mSampleRate)
     }
 
     private static func silence(_ buffer: AudioBuffer) {
@@ -591,7 +652,8 @@ private final class ProcessTapRoute: @unchecked Sendable {
         input: AudioBuffer,
         output: AudioBuffer,
         format: AudioStreamBasicDescription,
-        gain: Float
+        startGain: Float,
+        endGain: Float
     ) {
         guard let source = input.mData, let destination = output.mData else { return }
         let byteCount = min(input.mDataByteSize, output.mDataByteSize)
@@ -602,13 +664,37 @@ private final class ProcessTapRoute: @unchecked Sendable {
 
         let flags = format.mFormatFlags
         if flags & kAudioFormatFlagIsFloat != 0, format.mBitsPerChannel == 32 {
-            scaleFloat32(source: source, destination: destination, byteCount: byteCount, gain: gain)
+            scaleFloat32(
+                source: source,
+                destination: destination,
+                byteCount: byteCount,
+                startGain: startGain,
+                endGain: endGain
+            )
         } else if flags & kAudioFormatFlagIsFloat != 0, format.mBitsPerChannel == 64 {
-            scaleFloat64(source: source, destination: destination, byteCount: byteCount, gain: gain)
+            scaleFloat64(
+                source: source,
+                destination: destination,
+                byteCount: byteCount,
+                startGain: startGain,
+                endGain: endGain
+            )
         } else if format.mBitsPerChannel == 16 {
-            scaleInt16(source: source, destination: destination, byteCount: byteCount, gain: gain)
+            scaleInt16(
+                source: source,
+                destination: destination,
+                byteCount: byteCount,
+                startGain: startGain,
+                endGain: endGain
+            )
         } else if format.mBitsPerChannel == 32 {
-            scaleInt32(source: source, destination: destination, byteCount: byteCount, gain: gain)
+            scaleInt32(
+                source: source,
+                destination: destination,
+                byteCount: byteCount,
+                startGain: startGain,
+                endGain: endGain
+            )
         }
 
         // The tap can deliver a shorter buffer than the device asked for; the
@@ -622,47 +708,59 @@ private final class ProcessTapRoute: @unchecked Sendable {
         source: UnsafeRawPointer,
         destination: UnsafeMutableRawPointer,
         byteCount: UInt32,
-        gain: Float
+        startGain: Float,
+        endGain: Float
     ) {
-        var gain = gain
         let count = vDSP_Length(Int(byteCount) / MemoryLayout<Float>.size)
-        vDSP_vsmul(
-            source.assumingMemoryBound(to: Float.self),
-            1,
-            &gain,
-            destination.assumingMemoryBound(to: Float.self),
-            1,
-            count
-        )
+        guard count > 0 else { return }
+        let input = source.assumingMemoryBound(to: Float.self)
+        let output = destination.assumingMemoryBound(to: Float.self)
+
+        var value = startGain
+        var step = (endGain - startGain) / Float(count)
+        vDSP_vrampmul(input, 1, &value, &step, output, 1, count)
+
+        // The limiter attacks within a buffer, so a fast transient can still
+        // overshoot slightly on its way down. Clip that rather than let it wrap.
+        var low: Float = -1
+        var high: Float = 1
+        vDSP_vclip(output, 1, &low, &high, output, 1, count)
     }
 
     private static func scaleFloat64(
         source: UnsafeRawPointer,
         destination: UnsafeMutableRawPointer,
         byteCount: UInt32,
-        gain: Float
+        startGain: Float,
+        endGain: Float
     ) {
-        var gain = Double(gain)
-        let count = vDSP_Length(Int(byteCount) / MemoryLayout<Double>.size)
-        vDSP_vsmulD(
-            source.assumingMemoryBound(to: Double.self),
-            1,
-            &gain,
-            destination.assumingMemoryBound(to: Double.self),
-            1,
-            count
-        )
+        let count = Int(byteCount) / MemoryLayout<Double>.size
+        guard count > 0 else { return }
+        let input = source.assumingMemoryBound(to: Double.self)
+        let output = destination.assumingMemoryBound(to: Double.self)
+        let step = Double(endGain - startGain) / Double(count)
+
+        for index in 0..<count {
+            let gain = Double(startGain) + step * Double(index)
+            output[index] = min(max(input[index] * gain, -1), 1)
+        }
     }
 
     private static func scaleInt16(
         source: UnsafeRawPointer,
         destination: UnsafeMutableRawPointer,
         byteCount: UInt32,
-        gain: Float
+        startGain: Float,
+        endGain: Float
     ) {
+        let count = Int(byteCount) / MemoryLayout<Int16>.size
+        guard count > 0 else { return }
         let input = source.assumingMemoryBound(to: Int16.self)
         let output = destination.assumingMemoryBound(to: Int16.self)
-        for index in 0..<(Int(byteCount) / MemoryLayout<Int16>.size) {
+        let step = (endGain - startGain) / Float(count)
+
+        for index in 0..<count {
+            let gain = startGain + step * Float(index)
             output[index] = Int16(clamping: Int(Float(input[index]) * gain))
         }
     }
@@ -671,14 +769,30 @@ private final class ProcessTapRoute: @unchecked Sendable {
         source: UnsafeRawPointer,
         destination: UnsafeMutableRawPointer,
         byteCount: UInt32,
-        gain: Float
+        startGain: Float,
+        endGain: Float
     ) {
+        let count = Int(byteCount) / MemoryLayout<Int32>.size
+        guard count > 0 else { return }
         let input = source.assumingMemoryBound(to: Int32.self)
         let output = destination.assumingMemoryBound(to: Int32.self)
-        for index in 0..<(Int(byteCount) / MemoryLayout<Int32>.size) {
-            output[index] = Int32(clamping: Int64(Double(input[index]) * Double(gain)))
+        let step = Double(endGain - startGain) / Double(count)
+
+        for index in 0..<count {
+            let gain = Double(startGain) + step * Double(index)
+            output[index] = Int32(clamping: Int64(Double(input[index]) * gain))
         }
     }
+}
+
+/// Render-thread scratch state. Confined to the IOProc callback, which Core
+/// Audio never runs concurrently with itself for one device, so plain stored
+/// properties are safe here.
+private final class LimiterState: @unchecked Sendable {
+    var limiter = PeakLimiter()
+    /// The gain the previous buffer finished on, so the next one can ramp from
+    /// it instead of stepping.
+    var appliedGain: Float = 1
 }
 
 private final class RealtimeGain: @unchecked Sendable {

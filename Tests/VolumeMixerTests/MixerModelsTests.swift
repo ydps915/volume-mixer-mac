@@ -247,6 +247,69 @@ final class MixerModelsTests: XCTestCase {
         XCTAssertEqual(AudioLevelMeter.visualLevel(0.5), 0.888, accuracy: 0.01)
     }
 
+    // MARK: - Peak limiter
+
+    func testLimiterLeavesQuietSpeechAtFullBoost() {
+        var limiter = PeakLimiter()
+        // A quiet microphone at 200%: still far below the ceiling, so the boost
+        // must arrive untouched.
+        let gain = limiter.nextGain(inputPeak: 0.1, gain: 2, bufferDuration: 0.01)
+        XCTAssertEqual(gain, 2, accuracy: 0.0001)
+        XCTAssertEqual(limiter.reduction, 1, accuracy: 0.0001)
+    }
+
+    func testLimiterHoldsALoudBurstAtTheCeiling() {
+        var limiter = PeakLimiter()
+        // The same person speaking up: 0.8 * 2 would be 1.6, well past clipping.
+        let gain = limiter.nextGain(inputPeak: 0.8, gain: 2, bufferDuration: 0.01)
+        XCTAssertEqual(0.8 * gain, PeakLimiter.ceiling, accuracy: 0.0001)
+        XCTAssertLessThan(gain, 2)
+    }
+
+    func testLimiterNeverAllowsOutputAboveTheCeiling() {
+        var limiter = PeakLimiter()
+        // Attack is immediate, so even the first loud buffer cannot get out.
+        for peak in stride(from: 0.05, through: 1.0, by: 0.05) {
+            let gain = limiter.nextGain(inputPeak: Float(peak), gain: 2, bufferDuration: 0.01)
+            XCTAssertLessThanOrEqual(
+                Float(peak) * gain,
+                PeakLimiter.ceiling + 0.0001,
+                "peak \(peak) escaped the ceiling"
+            )
+        }
+    }
+
+    func testLimiterRecoversGraduallyAfterALoudBurst() {
+        var limiter = PeakLimiter()
+        _ = limiter.nextGain(inputPeak: 1, gain: 2, bufferDuration: 0.01)
+        let reductionAfterBurst = limiter.reduction
+        XCTAssertLessThan(reductionAfterBurst, 1)
+
+        // One quiet buffer must not snap the gain back, or the level pumps.
+        _ = limiter.nextGain(inputPeak: 0.01, gain: 2, bufferDuration: 0.01)
+        XCTAssertGreaterThan(limiter.reduction, reductionAfterBurst)
+        XCTAssertLessThan(limiter.reduction, 1)
+
+        // Given a second of quiet it should be back to the full boost.
+        for _ in 0..<100 {
+            _ = limiter.nextGain(inputPeak: 0.01, gain: 2, bufferDuration: 0.01)
+        }
+        XCTAssertEqual(limiter.reduction, 1, accuracy: 0.02)
+    }
+
+    func testLimiterDoesNotAttenuateBelowUnityGain() {
+        var limiter = PeakLimiter()
+        // A full-scale source at 50%: the output is 0.5, nothing to limit.
+        let gain = limiter.nextGain(inputPeak: 1, gain: 0.5, bufferDuration: 0.01)
+        XCTAssertEqual(gain, 0.5, accuracy: 0.0001)
+    }
+
+    func testLimiterHandlesSilenceAndMute() {
+        var limiter = PeakLimiter()
+        XCTAssertEqual(limiter.nextGain(inputPeak: 0, gain: 2, bufferDuration: 0.01), 2, accuracy: 0.0001)
+        XCTAssertEqual(limiter.nextGain(inputPeak: 0.5, gain: 0, bufferDuration: 0.01), 0, accuracy: 0.0001)
+    }
+
     func testHelperProcessesResolveToTheirOwningApp() {
         let chromeHelperURL = URL(fileURLWithPath:
             "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper (Renderer).app"

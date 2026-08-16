@@ -5,7 +5,7 @@ An open-source macOS volume mixer with individual controls for active apps.
 ## What it does
 
 - Per-app volume and mute controls.
-- Optional per-app boost up to 200%; it is off by default and may cause distortion.
+- Optional per-app boost up to 200%, off by default, with a **peak limiter** so it stays usable. Boosting a quiet talker normally means they clip the moment they raise their voice; the limiter holds only the peaks at about -1 dBFS and lets quiet speech through at the full boost. See [Boost and the limiter](#boost-and-the-limiter).
 - A live meter for each active app, using a perceptual dB scale so normal listening levels remain visible. It turns orange and then red as the app approaches clipping, which matters when boost is on.
 - Favorite an app to keep its control visible even when it is not playing audio.
 - A custom app icon and a monochrome menu-bar glyph that adapts to light and dark macOS menu bars.
@@ -18,6 +18,29 @@ An open-source macOS volume mixer with individual controls for active apps.
 
 The app uses Apple's public Core Audio Taps API rather than installing a virtual audio driver. It runs only on macOS 14.2 or later and requests **System Audio Recording** permission when the mixer is enabled.
 The app and Preferences window always show the current permission check result and provide **Check** and **Open Settings** actions.
+
+## Boost and the limiter
+
+Raising an app to 200% to hear someone with a quiet microphone works until that
+person speaks up: 0.85 amplitude at 200% is 1.7, far past full scale, and the
+result is the crackling that makes boost unusable.
+
+A peak limiter runs whenever the mixer is amplifying above 100%. It measures the
+peak of each buffer *before* rendering it, so it can pull the gain down on the
+very buffer that would have clipped, and recovers over about 250 ms so a sentence
+does not pump between words. Quiet passages keep the full boost.
+
+Measured on a synthetic quiet-talker signal with a loud burst, at 200%:
+
+| | peak | clipped samples |
+| --- | --- | --- |
+| Raw boost | 1.700 | 17188 |
+| With the limiter | 0.891 | 0 |
+
+Gain still applied to quiet speech shortly after the burst: **1.99×** of the 2×
+requested.
+
+It can be turned off in Preferences under **Boost** if you want the raw gain.
 
 ## Screen sharing and echo
 

@@ -264,6 +264,12 @@ final class MixerStore: ObservableObject {
         reconcileAudioRoutes()
     }
 
+    func setLimitPeaksWhenBoosting(_ enabled: Bool) {
+        settings.limitPeaksWhenBoosting = enabled
+        saveSettings()
+        reconcileAudioRoutes()
+    }
+
     /// The per-app switch shown on the row: take this app out of the mixer
     /// entirely, so it plays on its own route and nothing is re-rendered.
     func setBypassMixer(_ bypass: Bool, for bundleID: String) {
@@ -349,12 +355,16 @@ final class MixerStore: ObservableObject {
             let isConfigured = preference.isMuted || abs(preference.volume - 1) > 0.001
             guard warmBundleIDs.contains(session.bundleID) || isConfigured else { continue }
 
+            let gain = preference.effectiveGain(masterVolume: settings.masterVolume)
             targets.append(
                 RouteTarget(
                     id: session.bundleID,
                     displayName: session.displayName,
                     processObjectIDs: session.processObjectIDs,
-                    gain: preference.effectiveGain(masterVolume: settings.masterVolume)
+                    gain: gain,
+                    // Only while the mixer is actually amplifying. Below unity
+                    // there is nothing to protect against.
+                    limitPeaks: settings.limitPeaksWhenBoosting && gain > 1.0001
                 )
             )
         }

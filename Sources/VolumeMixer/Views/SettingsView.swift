@@ -22,6 +22,23 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Boost") {
+                Toggle(
+                    "Limitar picos ao usar boost",
+                    isOn: Binding(
+                        get: { store.settings.limitPeaksWhenBoosting },
+                        set: { store.setLimitPeaksWhenBoosting($0) }
+                    )
+                )
+                .tint(.blue)
+
+                Text("Segura só os picos, sem mexer no resto. É o que permite deixar o boost alto para ouvir quem está com o microfone baixo sem estourar quando a pessoa fala mais alto.")
+                    .foregroundStyle(.secondary)
+
+                Text("Desligue apenas se quiser o ganho cru, sem nenhum tratamento.")
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Chamadas e streams") {
                 Text("Para mudar o volume de um app, o Volume Mixer precisa silenciá-lo e reproduzir o áudio dele. Quem passa a emitir o som é o Volume Mixer, e o compartilhamento de tela do Discord — que exclui apenas os processos do próprio Discord — não consegue excluir essa cópia. O resultado é eco: quem está na chamada se escuta.")
                     .foregroundStyle(.secondary)

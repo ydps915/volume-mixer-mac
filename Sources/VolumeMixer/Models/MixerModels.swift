@@ -68,19 +68,24 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
     /// the boost used to hear a quiet microphone. The per-app bypass button is
     /// the primary control; this only automates it.
     var autoBypassWhileCapturing: Bool
+    /// On by default: boost without it clips as soon as a quiet talker raises
+    /// their voice, which is the main reason boost sounds bad. See `PeakLimiter`.
+    var limitPeaksWhenBoosting: Bool
 
     init(
         masterVolume: Double = 1,
         preferredOutputUID: String? = nil,
         mixerEnabled: Bool = false,
         launchAtLogin: Bool = false,
-        autoBypassWhileCapturing: Bool = false
+        autoBypassWhileCapturing: Bool = false,
+        limitPeaksWhenBoosting: Bool = true
     ) {
         self.masterVolume = min(max(masterVolume, 0), 1)
         self.preferredOutputUID = preferredOutputUID
         self.mixerEnabled = mixerEnabled
         self.launchAtLogin = launchAtLogin
         self.autoBypassWhileCapturing = autoBypassWhileCapturing
+        self.limitPeaksWhenBoosting = limitPeaksWhenBoosting
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -89,6 +94,7 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
         case mixerEnabled
         case launchAtLogin
         case autoBypassWhileCapturing
+        case limitPeaksWhenBoosting
     }
 
     init(from decoder: Decoder) throws {
@@ -104,7 +110,11 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
             autoBypassWhileCapturing: try container.decodeIfPresent(
                 Bool.self,
                 forKey: .autoBypassWhileCapturing
-            ) ?? false
+            ) ?? false,
+            limitPeaksWhenBoosting: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .limitPeaksWhenBoosting
+            ) ?? true
         )
     }
 
@@ -115,6 +125,7 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
         try container.encode(mixerEnabled, forKey: .mixerEnabled)
         try container.encode(launchAtLogin, forKey: .launchAtLogin)
         try container.encode(autoBypassWhileCapturing, forKey: .autoBypassWhileCapturing)
+        try container.encode(limitPeaksWhenBoosting, forKey: .limitPeaksWhenBoosting)
     }
 }
 
@@ -222,6 +233,7 @@ struct RouteTarget: Equatable, Sendable {
     let displayName: String
     let processObjectIDs: [UInt32]
     let gain: Float
+    var limitPeaks: Bool = false
 }
 
 /// Keeps an app's route alive for a short time after it goes silent, so a
@@ -309,6 +321,54 @@ enum OutputRouteResolver {
             return (preferredUID, false)
         }
         return (defaultUID, true)
+    }
+}
+
+/// Keeps a boosted app from clipping.
+///
+/// Boost is normally used to hear someone with a quiet microphone. The same
+/// boost then makes them clip the moment they speak up, which is what the ear
+/// hears as crackling. This pulls the gain down only while the signal would
+/// exceed the ceiling, so quiet speech keeps the full boost.
+///
+/// It is a value type with no allocation so the audio render thread can run it.
+struct PeakLimiter: Equatable, Sendable {
+    /// About -1 dBFS. Leaves headroom for the inter-sample peaks that a hard
+    /// 0 dBFS ceiling would let through.
+    static let ceiling: Float = 0.891
+    /// Slow enough that a sentence does not pump between words.
+    static let releaseTime: Float = 0.25
+
+    private(set) var reduction: Float = 1
+
+    /// - Parameters:
+    ///   - inputPeak: peak magnitude of the buffer about to be rendered, 0...1.
+    ///   - gain: the gain the mixer would otherwise apply.
+    ///   - bufferDuration: length of that buffer in seconds.
+    /// - Returns: the gain to apply instead.
+    mutating func nextGain(
+        inputPeak: Float,
+        gain: Float,
+        bufferDuration: Float
+    ) -> Float {
+        let projectedPeak = inputPeak * gain
+        let requiredReduction = projectedPeak > Self.ceiling
+            ? Self.ceiling / projectedPeak
+            : 1
+
+        if requiredReduction < reduction {
+            // Attack: the peak was measured before rendering, so taking the
+            // reduction on this very buffer means the transient never gets out.
+            reduction = requiredReduction
+        } else {
+            // Release: recover gradually, or the level audibly pumps.
+            let duration = min(max(bufferDuration, 0.001), 0.1)
+            let coefficient = 1 - exp(-duration / Self.releaseTime)
+            reduction += (requiredReduction - reduction) * coefficient
+        }
+
+        reduction = min(max(reduction, 0), 1)
+        return gain * reduction
     }
 }
 
