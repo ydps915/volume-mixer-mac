@@ -86,8 +86,8 @@ private struct CompactMixerRow: View {
     var body: some View {
         let preference = store.preference(for: session.bundleID)
         let isFavorite = store.isFavorite(session.bundleID)
-        let isProtectedFromCapture = store.isProtectedFromMixerCapture(session.bundleID)
-        let isDisabled = preference.isMuted || isProtectedFromCapture
+        let isBypassed = store.isBypassingMixer(session.bundleID)
+        let isDisabled = preference.isMuted || isBypassed
 
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
@@ -95,15 +95,11 @@ private struct CompactMixerRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
 
-                if isProtectedFromCapture {
-                    Image(systemName: session.isInputRunning ? "waveform.badge.mic" : "lock.fill")
+                if store.warnsAboutEcho(session.bundleID) {
+                    Image(systemName: "exclamationmark.triangle.fill")
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .help(
-                            session.isInputRunning
-                                ? "Em chamada: fora do mixer para não realimentar o stream"
-                                : "Protegido de chamadas e streams"
-                        )
+                        .foregroundStyle(.orange)
+                        .help(AppMixerRow.echoWarning)
                 }
 
                 Spacer(minLength: 4)
@@ -113,6 +109,24 @@ private struct CompactMixerRow: View {
                     .foregroundStyle(preference.boostEnabled && preference.appliedVolume > 1 ? .orange : .secondary)
 
                 Button {
+                    store.setBypassMixer(!preference.bypassMixer, for: session.bundleID)
+                } label: {
+                    Image(systemName: preference.bypassMixer ? "power.circle.fill" : "power.circle")
+                        .foregroundStyle(preference.bypassMixer ? .orange : .secondary)
+                }
+                .buttonStyle(.borderless)
+                .help(
+                    preference.bypassMixer
+                        ? "Devolver \(session.displayName) ao mixer"
+                        : "Tirar \(session.displayName) do mixer. \(AppMixerRow.echoWarning)"
+                )
+                .accessibilityLabel(
+                    preference.bypassMixer
+                        ? "Devolver \(session.displayName) ao mixer"
+                        : "Tirar \(session.displayName) do mixer"
+                )
+
+                Button {
                     store.setBoostEnabled(!preference.boostEnabled, for: session.bundleID)
                 } label: {
                     Text("2×")
@@ -120,7 +134,7 @@ private struct CompactMixerRow: View {
                         .foregroundStyle(preference.boostEnabled ? .orange : .secondary)
                 }
                 .buttonStyle(.borderless)
-                .disabled(isProtectedFromCapture)
+                .disabled(isBypassed)
                 .help(preference.boostEnabled ? "Desativar boost" : "Permitir até 200%")
                 .accessibilityLabel(
                     preference.boostEnabled
@@ -145,7 +159,7 @@ private struct CompactMixerRow: View {
                         .foregroundStyle(preference.isMuted ? .orange : .primary)
                 }
                 .buttonStyle(.borderless)
-                .disabled(isProtectedFromCapture)
+                .disabled(isBypassed)
                 .help(preference.isMuted ? "Ativar som" : "Silenciar")
                 .accessibilityLabel(preference.isMuted ? "Ativar som de \(session.displayName)" : "Silenciar \(session.displayName)")
             }

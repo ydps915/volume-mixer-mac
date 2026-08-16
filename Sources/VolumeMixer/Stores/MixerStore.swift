@@ -258,24 +258,41 @@ final class MixerStore: ObservableObject {
         }
     }
 
-    func setDiscordProtection(_ mode: DiscordProtectionMode) {
-        settings.discordProtection = mode
+    func setAutoBypassWhileCapturing(_ enabled: Bool) {
+        settings.autoBypassWhileCapturing = enabled
         saveSettings()
         reconcileAudioRoutes()
     }
 
-    func isProtectedFromMixerCapture(_ bundleID: String) -> Bool {
-        StreamSafetyPolicy.excludesFromMixerCapture(
+    /// The per-app switch shown on the row: take this app out of the mixer
+    /// entirely, so it plays on its own route and nothing is re-rendered.
+    func setBypassMixer(_ bypass: Bool, for bundleID: String) {
+        guard !bundleID.isEmpty else { return }
+        var preference = appPreferences[bundleID] ?? AppVolumePreference()
+        guard preference.bypassMixer != bypass else { return }
+        preference.bypassMixer = bypass
+        appPreferences[bundleID] = preference
+        saveAppPreferences()
+        reconcileAudioRoutes()
+    }
+
+    func isBypassingMixer(_ bundleID: String) -> Bool {
+        StreamSafetyPolicy.bypassesMixer(
             bundleID: bundleID,
-            mode: settings.discordProtection,
+            bypassMixer: preference(for: bundleID).bypassMixer,
+            autoBypassWhileCapturing: settings.autoBypassWhileCapturing,
             isCapturingAudio: capturingBundleIDs.contains(bundleID)
         )
     }
 
-    /// True when the app is being left alone right now specifically because it
-    /// is capturing, so the UI can say so instead of looking broken.
-    func isCapturingAudio(_ bundleID: String) -> Bool {
-        capturingBundleIDs.contains(bundleID)
+    /// The mixer is rendering an app that is capturing audio right now, so
+    /// sharing a screen would feed its own audio back into the call.
+    func warnsAboutEcho(_ bundleID: String) -> Bool {
+        StreamSafetyPolicy.warnsAboutEcho(
+            bundleID: bundleID,
+            isBypassingMixer: isBypassingMixer(bundleID),
+            isCapturingAudio: capturingBundleIDs.contains(bundleID)
+        )
     }
 
     func openSystemSettings() {
@@ -318,7 +335,7 @@ final class MixerStore: ObservableObject {
         var targets: [RouteTarget] = []
 
         for session in appSessions where !session.processObjectIDs.isEmpty {
-            guard !isProtectedFromMixerCapture(session.bundleID) else {
+            guard !isBypassingMixer(session.bundleID) else {
                 protectedBundleIDs.insert(session.bundleID)
                 continue
             }

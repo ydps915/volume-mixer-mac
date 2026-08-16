@@ -9,7 +9,7 @@ struct AppMixerRow: View {
     var body: some View {
         let preference = store.preference(for: session.bundleID)
         let isFavorite = store.isFavorite(session.bundleID)
-        let isProtectedFromCapture = store.isProtectedFromMixerCapture(session.bundleID)
+        let isBypassed = store.isBypassingMixer(session.bundleID)
 
         HStack(spacing: 12) {
             AppIcon(bundleID: session.bundleID)
@@ -17,12 +17,20 @@ struct AppMixerRow: View {
                 .opacity(session.isOutputRunning ? 1 : 0.55)
 
             VStack(alignment: .leading, spacing: 3) {
-                Text(session.displayName)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Text(statusText(preference: preference, isProtectedFromCapture: isProtectedFromCapture))
+                HStack(spacing: 4) {
+                    Text(session.displayName)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if warnsAboutEcho {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .help(Self.echoWarning)
+                    }
+                }
+                Text(statusText(preference: preference, isBypassed: isBypassed))
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(warnsAboutEcho ? .orange : .secondary)
                     .lineLimit(1)
             }
             .frame(width: 145, alignment: .leading)
@@ -35,7 +43,7 @@ struct AppMixerRow: View {
                     ),
                     in: 0...preference.maximumVolume
                 )
-                .disabled(preference.isMuted || isProtectedFromCapture)
+                .disabled(preference.isMuted || isBypassed)
                 .accessibilityLabel("Volume de \(session.displayName)")
 
                 AudioLevelMeter(bundleID: session.bundleID)
@@ -46,6 +54,26 @@ struct AppMixerRow: View {
                 .foregroundStyle(preference.boostEnabled && preference.appliedVolume > 1 ? .orange : .secondary)
                 .frame(width: 40, alignment: .trailing)
 
+            // Right on the row, so taking an app out of the mixer before a
+            // screen share does not mean a trip to Preferences.
+            Button {
+                store.setBypassMixer(!preference.bypassMixer, for: session.bundleID)
+            } label: {
+                Image(systemName: preference.bypassMixer ? "power.circle.fill" : "power.circle")
+                    .foregroundStyle(preference.bypassMixer ? .orange : .secondary)
+            }
+            .buttonStyle(.borderless)
+            .help(
+                preference.bypassMixer
+                    ? "Devolver \(session.displayName) ao mixer"
+                    : "Tirar \(session.displayName) do mixer. \(Self.echoWarning)"
+            )
+            .accessibilityLabel(
+                preference.bypassMixer
+                    ? "Devolver \(session.displayName) ao mixer"
+                    : "Tirar \(session.displayName) do mixer"
+            )
+
             Toggle(
                 "Boost",
                 isOn: Binding(
@@ -55,7 +83,7 @@ struct AppMixerRow: View {
             )
             .toggleStyle(.checkbox)
             .controlSize(.small)
-            .disabled(isProtectedFromCapture)
+            .disabled(isBypassed)
             .help("Permite aumentar este app até 200%. Pode causar distorção.")
             .accessibilityLabel("Boost de \(session.displayName)")
 
@@ -66,7 +94,7 @@ struct AppMixerRow: View {
                     .foregroundStyle(preference.isMuted ? .orange : .primary)
             }
             .buttonStyle(.borderless)
-            .disabled(isProtectedFromCapture)
+            .disabled(isBypassed)
             .help(preference.isMuted ? "Ativar som" : "Silenciar")
             .accessibilityLabel(preference.isMuted ? "Ativar som de \(session.displayName)" : "Silenciar \(session.displayName)")
 
@@ -83,15 +111,21 @@ struct AppMixerRow: View {
         .padding(.vertical, 4)
     }
 
+    static let echoWarning = """
+        Este app está capturando áudio. Se você compartilhar a tela com som \
+        enquanto o mixer o reproduz, quem está na chamada vai se ouvir.
+        """
+
+    private var warnsAboutEcho: Bool {
+        store.warnsAboutEcho(session.bundleID)
+    }
+
     private func statusText(
         preference: AppVolumePreference,
-        isProtectedFromCapture: Bool
+        isBypassed: Bool
     ) -> String {
-        if isProtectedFromCapture {
-            return session.isInputRunning
-                ? "Em chamada — fora do mixer para não dar eco"
-                : "Protegido de streams"
-        }
+        if isBypassed { return "Fora do mixer" }
+        if warnsAboutEcho { return "Em chamada — risco de eco no stream" }
         if preference.isMuted { return "Silenciado" }
         if preference.boostEnabled && preference.appliedVolume > 1 { return "Boost ativado" }
         return session.isOutputRunning ? "Áudio ativo" : "Favorito — sem áudio"

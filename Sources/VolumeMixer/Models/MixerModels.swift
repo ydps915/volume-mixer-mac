@@ -4,8 +4,18 @@ struct AppVolumePreference: Codable, Equatable, Sendable {
     var volume: Double
     var isMuted: Bool
     var boostEnabled: Bool
+    /// Keep this app on its own route: the mixer neither meters nor renders it.
+    /// The one-click escape from the screen-share echo described in
+    /// `StreamSafetyPolicy`.
+    var bypassMixer: Bool
 
-    init(volume: Double = 1, isMuted: Bool = false, boostEnabled: Bool = false) {
+    init(
+        volume: Double = 1,
+        isMuted: Bool = false,
+        boostEnabled: Bool = false,
+        bypassMixer: Bool = false
+    ) {
+        self.bypassMixer = bypassMixer
         self.boostEnabled = boostEnabled
         // Kept up to 200% even with boost off, so turning boost off and on again
         // restores the level the user had set instead of silently losing it.
@@ -27,6 +37,7 @@ struct AppVolumePreference: Codable, Equatable, Sendable {
         case volume
         case isMuted
         case boostEnabled
+        case bypassMixer
     }
 
     init(from decoder: Decoder) throws {
@@ -34,7 +45,8 @@ struct AppVolumePreference: Codable, Equatable, Sendable {
         self.init(
             volume: try container.decodeIfPresent(Double.self, forKey: .volume) ?? 1,
             isMuted: try container.decodeIfPresent(Bool.self, forKey: .isMuted) ?? false,
-            boostEnabled: try container.decodeIfPresent(Bool.self, forKey: .boostEnabled) ?? false
+            boostEnabled: try container.decodeIfPresent(Bool.self, forKey: .boostEnabled) ?? false,
+            bypassMixer: try container.decodeIfPresent(Bool.self, forKey: .bypassMixer) ?? false
         )
     }
 
@@ -43,6 +55,7 @@ struct AppVolumePreference: Codable, Equatable, Sendable {
         try container.encode(volume, forKey: .volume)
         try container.encode(isMuted, forKey: .isMuted)
         try container.encode(boostEnabled, forKey: .boostEnabled)
+        try container.encode(bypassMixer, forKey: .bypassMixer)
     }
 }
 
@@ -51,20 +64,23 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
     var preferredOutputUID: String?
     var mixerEnabled: Bool
     var launchAtLogin: Bool
-    var discordProtection: DiscordProtectionMode
+    /// Off by default: taking Discord out of the mixer mid-call also takes away
+    /// the boost used to hear a quiet microphone. The per-app bypass button is
+    /// the primary control; this only automates it.
+    var autoBypassWhileCapturing: Bool
 
     init(
         masterVolume: Double = 1,
         preferredOutputUID: String? = nil,
         mixerEnabled: Bool = false,
         launchAtLogin: Bool = false,
-        discordProtection: DiscordProtectionMode = .duringCallsAndStreams
+        autoBypassWhileCapturing: Bool = false
     ) {
         self.masterVolume = min(max(masterVolume, 0), 1)
         self.preferredOutputUID = preferredOutputUID
         self.mixerEnabled = mixerEnabled
         self.launchAtLogin = launchAtLogin
-        self.discordProtection = discordProtection
+        self.autoBypassWhileCapturing = autoBypassWhileCapturing
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -72,39 +88,24 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
         case preferredOutputUID
         case mixerEnabled
         case launchAtLogin
-        case discordProtection
-        case protectDiscordDuringStreams
+        case autoBypassWhileCapturing
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Earlier builds stored `protectDiscordDuringStreams` and then
+        // `discordProtection`. Both are dropped rather than migrated: they made
+        // the choice global and automatic, which is what this replaces.
         self.init(
             masterVolume: try container.decodeIfPresent(Double.self, forKey: .masterVolume) ?? 1,
             preferredOutputUID: try container.decodeIfPresent(String.self, forKey: .preferredOutputUID),
             mixerEnabled: try container.decodeIfPresent(Bool.self, forKey: .mixerEnabled) ?? false,
             launchAtLogin: try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false,
-            discordProtection: try Self.decodeProtection(from: container)
+            autoBypassWhileCapturing: try container.decodeIfPresent(
+                Bool.self,
+                forKey: .autoBypassWhileCapturing
+            ) ?? false
         )
-    }
-
-    /// The setting used to be a Bool. `true` meant "never route Discord", which
-    /// maps to `.always`. `false` left the user exposed to the screen-share echo
-    /// this protection exists for, so it now becomes the automatic mode rather
-    /// than `.never`.
-    private static func decodeProtection(
-        from container: KeyedDecodingContainer<CodingKeys>
-    ) throws -> DiscordProtectionMode {
-        if let mode = try container.decodeIfPresent(
-            DiscordProtectionMode.self,
-            forKey: .discordProtection
-        ) {
-            return mode
-        }
-        let legacyAlwaysProtect = try container.decodeIfPresent(
-            Bool.self,
-            forKey: .protectDiscordDuringStreams
-        )
-        return legacyAlwaysProtect == true ? .always : .duringCallsAndStreams
     }
 
     func encode(to encoder: Encoder) throws {
@@ -113,7 +114,7 @@ struct MixerAppSettings: Codable, Equatable, Sendable {
         try container.encodeIfPresent(preferredOutputUID, forKey: .preferredOutputUID)
         try container.encode(mixerEnabled, forKey: .mixerEnabled)
         try container.encode(launchAtLogin, forKey: .launchAtLogin)
-        try container.encode(discordProtection, forKey: .discordProtection)
+        try container.encode(autoBypassWhileCapturing, forKey: .autoBypassWhileCapturing)
     }
 }
 
@@ -252,31 +253,19 @@ struct WarmRouteCache {
     }
 }
 
-enum DiscordProtectionMode: String, Codable, CaseIterable, Sendable {
-    /// Leave Discord out of the mixer only while it is capturing audio, which is
-    /// what a call or a screen share with sound looks like from Core Audio.
-    case duringCallsAndStreams
-    /// Never route Discord through the mixer.
-    case always
-    /// Always route it; the user accepts the echo risk while sharing.
-    case never
-
-    var title: String {
-        switch self {
-        case .duringCallsAndStreams: "Durante chamadas e streams"
-        case .always: "Sempre"
-        case .never: "Nunca"
-        }
-    }
-}
-
 /// Why this exists: to change an app's volume the mixer has to mute that app and
 /// re-render its audio, which makes **Volume Mixer** the process emitting the
-/// sound. Discord's screen share captures every process except its own, so it
-/// cannot exclude that re-rendered copy — participants end up hearing
+/// sound. A screen share captures every process except the sharing app's own, so
+/// it cannot exclude that re-rendered copy — participants end up hearing
 /// themselves. There is no way to opt out of another app's capture, so the only
-/// fix is to leave Discord on its own route while it is capturing.
+/// fix is to leave the app on its own route.
+///
+/// That is a manual choice by default: silently dropping Discord from the mixer
+/// during a call also takes away the boost people rely on to hear a quiet mic.
+/// The row shows a warning instead, and one click bypasses the app.
 enum StreamSafetyPolicy {
+    /// Apps that capture system audio for screen sharing, and therefore echo if
+    /// the mixer renders them.
     static func isStreamSensitive(bundleID: String) -> Bool {
         let normalizedBundleID = bundleID.lowercased()
         return normalizedBundleID.hasPrefix("com.hnc.discord")
@@ -284,17 +273,26 @@ enum StreamSafetyPolicy {
             || normalizedBundleID.hasPrefix("com.discordapp.discord")
     }
 
-    static func excludesFromMixerCapture(
+    static func bypassesMixer(
         bundleID: String,
-        mode: DiscordProtectionMode,
+        bypassMixer: Bool,
+        autoBypassWhileCapturing: Bool,
         isCapturingAudio: Bool
     ) -> Bool {
-        guard isStreamSensitive(bundleID: bundleID) else { return false }
-        switch mode {
-        case .always: return true
-        case .never: return false
-        case .duringCallsAndStreams: return isCapturingAudio
-        }
+        if bypassMixer { return true }
+        return autoBypassWhileCapturing
+            && isCapturingAudio
+            && isStreamSensitive(bundleID: bundleID)
+    }
+
+    /// The app is being rendered by the mixer while it is capturing audio, so a
+    /// screen share right now would feed its own audio back into the call.
+    static func warnsAboutEcho(
+        bundleID: String,
+        isBypassingMixer: Bool,
+        isCapturingAudio: Bool
+    ) -> Bool {
+        !isBypassingMixer && isCapturingAudio && isStreamSensitive(bundleID: bundleID)
     }
 }
 

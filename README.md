@@ -9,7 +9,7 @@ An open-source macOS volume mixer with individual controls for active apps.
 - A live meter for each active app, using a perceptual dB scale so normal listening levels remain visible. It turns orange and then red as the app approaches clipping, which matters when boost is on.
 - Favorite an app to keep its control visible even when it is not playing audio.
 - A custom app icon and a monochrome menu-bar glyph that adapts to light and dark macOS menu bars.
-- Discord is automatically left out of the mixer while it is capturing audio — a call or a screen share with sound — so a shared screen never feeds Discord's own audio back to the call. The rest of the time you control its volume normally. See [Screen sharing and echo](#screen-sharing-and-echo).
+- A per-app **⏻ button** on every row takes that app out of the mixer in one click, which is what stops a Discord screen share from echoing. Discord stays adjustable during calls — including boost for a quiet mic — with a warning on its row while sharing would echo. See [Screen sharing and echo](#screen-sharing-and-echo).
 - Core Audio change notifications and a short warm-route cache apply a saved app volume as soon as audio resumes, instead of relying on a periodic app scan.
 - A global master volume and one selected physical output.
 - Menu bar controls, a full window, remembered app preferences, and an optional login item. The menu bar item is installed by the app itself, so it is present even when the app starts with no window — for example as a login item.
@@ -25,15 +25,13 @@ To change an app's volume the mixer has to mute that app and re-render its audio
 
 Discord's screen share captures every process except Discord's own. It has no way to know that the Volume Mixer stream it is capturing *is* Discord's audio, so if the mixer is routing Discord while you share your screen, participants hear themselves. Nothing in the app can opt out of another app's capture — the only fix is to keep Discord on its own route while it is capturing.
 
-Preferences offers three modes:
+This is a manual choice, on purpose. Dropping Discord from the mixer automatically would also drop the boost people rely on to hear someone with a quiet microphone — exactly when they need it.
 
-| Mode | Behaviour |
-| --- | --- |
-| **Durante chamadas e streams** (default) | Discord leaves the mixer only while `kAudioProcessPropertyIsRunningInput` is true for it. You keep volume control the rest of the time. |
-| **Sempre** | Discord is never routed through the mixer. |
-| **Nunca** | Discord is always routed. Only safe if you never share your screen with sound. |
+So every row has a **⏻ button** that takes that app out of the mixer instantly. Press it before sharing your screen with sound, press it again afterwards. The app keeps playing normally the whole time; only the mixer stops touching it. The choice is remembered per app.
 
-The automatic mode cannot tell a plain voice call apart from a screen share with sound: private Core Audio taps are not visible to other processes, so "Discord is capturing audio" is the most precise signal available. It errs toward protecting the call.
+While an app that captures audio is being rendered by the mixer, its row shows an orange warning so you know a screen share right now would echo. Preferences has an off-by-default toggle to make that bypass automatic instead, if you prefer safety over control.
+
+The automatic option cannot tell a plain voice call apart from a screen share with sound: private Core Audio taps are not visible to other processes, so `kAudioProcessPropertyIsRunningInput` — "this app is capturing audio" — is the most precise signal available.
 
 Other apps are unaffected: while sharing, participants still hear them at the levels the mixer is applying, which is what you hear too.
 

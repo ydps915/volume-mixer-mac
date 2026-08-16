@@ -45,37 +45,36 @@ final class MixerModelsTests: XCTestCase {
         XCTAssertEqual(preference.effectiveGain(masterVolume: 1), 1, accuracy: 0.0001)
     }
 
-    func testSettingsWithoutDiscordKeyUseAutomaticProtection() throws {
-        let data = Data(#"{"masterVolume":0.8,"mixerEnabled":true,"launchAtLogin":false}"#.utf8)
-        let settings = try JSONDecoder().decode(MixerAppSettings.self, from: data)
-        XCTAssertEqual(settings.discordProtection, .duringCallsAndStreams)
+    func testAutoBypassIsOffForSettingsFromEveryEarlierBuild() throws {
+        // No Discord key at all.
+        let plain = Data(#"{"masterVolume":0.8,"mixerEnabled":true}"#.utf8)
+        let settings = try JSONDecoder().decode(MixerAppSettings.self, from: plain)
+        XCTAssertFalse(settings.autoBypassWhileCapturing)
         XCTAssertEqual(settings.masterVolume, 0.8)
+
+        // The two shapes shipped before the per-app bypass replaced them. Both
+        // made the choice global and automatic; neither is carried over.
+        for legacy in [
+            #"{"protectDiscordDuringStreams":true}"#,
+            #"{"protectDiscordDuringStreams":false}"#,
+            #"{"discordProtection":"always"}"#,
+            #"{"discordProtection":"duringCallsAndStreams"}"#,
+        ] {
+            let decoded = try JSONDecoder().decode(
+                MixerAppSettings.self,
+                from: Data(legacy.utf8)
+            )
+            XCTAssertFalse(decoded.autoBypassWhileCapturing, "legacy: \(legacy)")
+        }
     }
 
-    func testLegacyDiscordBooleanMigratesToAMode() throws {
-        // `true` meant "never route Discord at all".
-        let alwaysData = Data(#"{"protectDiscordDuringStreams":true}"#.utf8)
-        XCTAssertEqual(
-            try JSONDecoder().decode(MixerAppSettings.self, from: alwaysData).discordProtection,
-            .always
-        )
-
-        // `false` left the user exposed to the screen-share echo, so it becomes
-        // the automatic mode rather than `.never`.
-        let offData = Data(#"{"protectDiscordDuringStreams":false}"#.utf8)
-        XCTAssertEqual(
-            try JSONDecoder().decode(MixerAppSettings.self, from: offData).discordProtection,
-            .duringCallsAndStreams
-        )
-    }
-
-    func testDiscordProtectionModeRoundTrips() throws {
-        let settings = MixerAppSettings(discordProtection: .never)
+    func testAutoBypassRoundTrips() throws {
+        let settings = MixerAppSettings(autoBypassWhileCapturing: true)
         let decoded = try JSONDecoder().decode(
             MixerAppSettings.self,
             from: try JSONEncoder().encode(settings)
         )
-        XCTAssertEqual(decoded.discordProtection, .never)
+        XCTAssertTrue(decoded.autoBypassWhileCapturing)
     }
 
     func testDiscordStreamSafetyMatchesMainAppAndHelperBundleIDs() {
@@ -84,37 +83,91 @@ final class MixerModelsTests: XCTestCase {
         XCTAssertFalse(StreamSafetyPolicy.isStreamSensitive(bundleID: "com.google.Chrome"))
     }
 
-    func testAutomaticProtectionOnlyExcludesDiscordWhileItCapturesAudio() {
-        func excludes(_ bundleID: String, capturing: Bool) -> Bool {
-            StreamSafetyPolicy.excludesFromMixerCapture(
+    func testDiscordStaysInTheMixerDuringACallByDefault() {
+        // The whole point: a quiet microphone still needs the boost mid-call.
+        XCTAssertFalse(StreamSafetyPolicy.bypassesMixer(
+            bundleID: "com.hnc.Discord",
+            bypassMixer: false,
+            autoBypassWhileCapturing: false,
+            isCapturingAudio: true
+        ))
+        // But the row says why it might want to be taken out.
+        XCTAssertTrue(StreamSafetyPolicy.warnsAboutEcho(
+            bundleID: "com.hnc.Discord",
+            isBypassingMixer: false,
+            isCapturingAudio: true
+        ))
+    }
+
+    func testPerAppBypassWinsRegardlessOfCaptureState() {
+        for capturing in [true, false] {
+            XCTAssertTrue(StreamSafetyPolicy.bypassesMixer(
+                bundleID: "com.hnc.Discord",
+                bypassMixer: true,
+                autoBypassWhileCapturing: false,
+                isCapturingAudio: capturing
+            ))
+            // A bypassed app is already safe, so there is nothing to warn about.
+            XCTAssertFalse(StreamSafetyPolicy.warnsAboutEcho(
+                bundleID: "com.hnc.Discord",
+                isBypassingMixer: true,
+                isCapturingAudio: capturing
+            ))
+        }
+        // The bypass is per app, so it works for anything, not just Discord.
+        XCTAssertTrue(StreamSafetyPolicy.bypassesMixer(
+            bundleID: "com.spotify.client",
+            bypassMixer: true,
+            autoBypassWhileCapturing: false,
+            isCapturingAudio: false
+        ))
+    }
+
+    func testOptionalAutoBypassOnlyAppliesToStreamSensitiveAppsWhileCapturing() {
+        func bypasses(_ bundleID: String, capturing: Bool) -> Bool {
+            StreamSafetyPolicy.bypassesMixer(
                 bundleID: bundleID,
-                mode: .duringCallsAndStreams,
+                bypassMixer: false,
+                autoBypassWhileCapturing: true,
                 isCapturingAudio: capturing
             )
         }
 
-        // In a call or sharing the screen: leave it alone, or the re-rendered
-        // copy is fed straight back into the stream.
-        XCTAssertTrue(excludes("com.hnc.Discord", capturing: true))
-        // Idle: the user gets normal volume control.
-        XCTAssertFalse(excludes("com.hnc.Discord", capturing: false))
-        // Other apps are never affected, capturing or not.
-        XCTAssertFalse(excludes("com.google.Chrome", capturing: true))
+        XCTAssertTrue(bypasses("com.hnc.Discord", capturing: true))
+        XCTAssertFalse(bypasses("com.hnc.Discord", capturing: false))
+        // A different app capturing audio is not a screen-share echo risk for
+        // the mixer, so it keeps its route.
+        XCTAssertFalse(bypasses("com.google.Chrome", capturing: true))
     }
 
-    func testAlwaysAndNeverProtectionModesIgnoreCaptureState() {
-        for capturing in [true, false] {
-            XCTAssertTrue(StreamSafetyPolicy.excludesFromMixerCapture(
-                bundleID: "com.hnc.Discord",
-                mode: .always,
-                isCapturingAudio: capturing
-            ))
-            XCTAssertFalse(StreamSafetyPolicy.excludesFromMixerCapture(
-                bundleID: "com.hnc.Discord",
-                mode: .never,
-                isCapturingAudio: capturing
-            ))
-        }
+    func testNonCapturingAppNeverWarnsAboutEcho() {
+        XCTAssertFalse(StreamSafetyPolicy.warnsAboutEcho(
+            bundleID: "com.hnc.Discord",
+            isBypassingMixer: false,
+            isCapturingAudio: false
+        ))
+        XCTAssertFalse(StreamSafetyPolicy.warnsAboutEcho(
+            bundleID: "com.spotify.client",
+            isBypassingMixer: false,
+            isCapturingAudio: true
+        ))
+    }
+
+    func testBypassSurvivesAPreferenceRoundTrip() throws {
+        let preference = AppVolumePreference(volume: 0.4, bypassMixer: true)
+        let decoded = try JSONDecoder().decode(
+            AppVolumePreference.self,
+            from: try JSONEncoder().encode(preference)
+        )
+        XCTAssertTrue(decoded.bypassMixer)
+        XCTAssertEqual(decoded.volume, 0.4, accuracy: 0.0001)
+
+        // Preferences written before the bypass existed decode as "in the mixer".
+        let legacy = try JSONDecoder().decode(
+            AppVolumePreference.self,
+            from: Data(#"{"volume":0.5,"isMuted":false,"boostEnabled":false}"#.utf8)
+        )
+        XCTAssertFalse(legacy.bypassMixer)
     }
 
     func testWarmRouteCacheKeepsRecentlySilentAppReady() {
