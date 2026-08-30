@@ -201,6 +201,56 @@ enum AudioHardware {
         return buffers.reduce(0) { $0 + Int($1.mNumberChannels) }
     }
 
+    /// The format the device actually renders, which is not necessarily the
+    /// tap's format: a Bluetooth headset commonly runs at 44.1 kHz while the
+    /// system mixdown a tap delivers is 48 kHz.
+    static func outputStreamFormat(deviceID: AudioObjectID) -> AudioStreamBasicDescription? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &dataSize) == noErr,
+              dataSize >= UInt32(MemoryLayout<AudioObjectID>.size) else {
+            return nil
+        }
+
+        var streams = Array(
+            repeating: AudioObjectID(kAudioObjectUnknown),
+            count: Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        )
+        guard streams.withUnsafeMutableBufferPointer({
+            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, $0.baseAddress!)
+        }) == noErr, let stream = streams.first else {
+            return nil
+        }
+
+        var format = AudioStreamBasicDescription()
+        var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        var formatAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioStreamPropertyVirtualFormat,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(
+            stream,
+            &formatAddress,
+            0,
+            nil,
+            &formatSize,
+            &format
+        ) == noErr else {
+            return nil
+        }
+        return format
+    }
+
+    static func outputStreamFormat(deviceUID: String) -> AudioStreamBasicDescription? {
+        guard let deviceID = deviceID(forUID: deviceUID) else { return nil }
+        return outputStreamFormat(deviceID: deviceID)
+    }
+
     static func tapFormat(tapID: AudioObjectID) -> AudioStreamBasicDescription? {
         var format = AudioStreamBasicDescription()
         var dataSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)

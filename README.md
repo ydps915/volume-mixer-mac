@@ -42,6 +42,19 @@ requested.
 
 It can be turned off in Preferences under **Boost** if you want the raw gain.
 
+## Recovering from a dead route
+
+An adjusted app is muted at the system level and played back by the mixer, so if
+that route ever stops rendering the app goes **silent** rather than merely
+unadjusted. A Bluetooth output reconnecting, or changing sample rate underneath a
+running route, both do this. The mixer now checks each rendering route once a
+second and, after three consecutive silent checks, tears it down — which unmutes
+the app immediately — and rebuilds it. The same check rebuilds a route whose
+device changed format.
+
+Only routes whose app is actually producing audio are checked. A pre-armed route
+for an idle app legitimately receives no callbacks.
+
 ## Screen sharing and echo
 
 To change an app's volume the mixer has to mute that app and re-render its audio itself. The process emitting the sound therefore becomes **Volume Mixer**, not the original app.

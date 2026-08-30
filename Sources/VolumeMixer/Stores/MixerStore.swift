@@ -75,6 +75,9 @@ final class MixerStore: ObservableObject {
         engine.onRoutingIssueChange = { [weak self] issue in
             self?.routingIssue = issue
         }
+        engine.onRoutesNeedRebuild = { [weak self] in
+            self?.refresh()
+        }
     }
 
     func start() {
@@ -166,11 +169,11 @@ final class MixerStore: ObservableObject {
         engine.activate { [weak self] granted in
             guard let self else { return }
             self.systemAudioPermission = granted ? .granted : .required
-            guard granted else {
-                self.settings.mixerEnabled = false
-                self.saveSettings()
-                return
-            }
+            // Deliberately leaves `mixerEnabled` on. Flipping the user's own
+            // switch off because a permission check failed looks like the app
+            // turning itself off, and hides why. The permission panel and the
+            // engine state say what to do instead.
+            guard granted else { return }
             self.reconcileAudioRoutes()
         }
     }
@@ -364,7 +367,8 @@ final class MixerStore: ObservableObject {
                     gain: gain,
                     // Only while the mixer is actually amplifying. Below unity
                     // there is nothing to protect against.
-                    limitPeaks: settings.limitPeaksWhenBoosting && gain > 1.0001
+                    limitPeaks: settings.limitPeaksWhenBoosting && gain > 1.0001,
+                    isPlaying: session.isOutputRunning
                 )
             )
         }

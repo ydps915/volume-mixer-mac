@@ -234,6 +234,9 @@ struct RouteTarget: Equatable, Sendable {
     let processObjectIDs: [UInt32]
     let gain: Float
     var limitPeaks: Bool = false
+    /// The app is producing audio right now, as opposed to being pre-armed for
+    /// when it starts. Only a playing route can be judged unhealthy.
+    var isPlaying: Bool = true
 }
 
 /// Keeps an app's route alive for a short time after it goes silent, so a

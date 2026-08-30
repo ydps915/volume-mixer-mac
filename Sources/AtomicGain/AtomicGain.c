@@ -77,3 +77,34 @@ float VMAtomicGainExchange(VMAtomicGain *gain, float newValue) {
 void VMAtomicGainDestroy(VMAtomicGain *gain) {
     free(gain);
 }
+
+struct VMAtomicCounter {
+    _Atomic unsigned long long value;
+};
+
+VMAtomicCounter *VMAtomicCounterCreate(void) {
+    VMAtomicCounter *counter = calloc(1, sizeof(VMAtomicCounter));
+    if (counter == NULL) {
+        return NULL;
+    }
+    atomic_init(&counter->value, 0);
+    return counter;
+}
+
+void VMAtomicCounterIncrement(VMAtomicCounter *counter) {
+    if (counter == NULL) {
+        return;
+    }
+    atomic_fetch_add_explicit(&counter->value, 1, memory_order_relaxed);
+}
+
+unsigned long long VMAtomicCounterLoad(const VMAtomicCounter *counter) {
+    if (counter == NULL) {
+        return 0;
+    }
+    return atomic_load_explicit(&counter->value, memory_order_relaxed);
+}
+
+void VMAtomicCounterDestroy(VMAtomicCounter *counter) {
+    free(counter);
+}

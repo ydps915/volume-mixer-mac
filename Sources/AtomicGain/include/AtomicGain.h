@@ -17,4 +17,13 @@ float VMAtomicGainExchange(VMAtomicGain *gain, float newValue);
 
 void VMAtomicGainDestroy(VMAtomicGain *gain);
 
+/// A free-running counter the audio render thread can bump so another thread can
+/// tell whether rendering is still happening.
+typedef struct VMAtomicCounter VMAtomicCounter;
+
+VMAtomicCounter *VMAtomicCounterCreate(void);
+void VMAtomicCounterIncrement(VMAtomicCounter *counter);
+unsigned long long VMAtomicCounterLoad(const VMAtomicCounter *counter);
+void VMAtomicCounterDestroy(VMAtomicCounter *counter);
+
 #endif
