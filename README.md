@@ -52,8 +52,20 @@ second and, after three consecutive silent checks, tears it down — which unmut
 the app immediately — and rebuilds it. The same check rebuilds a route whose
 device changed format.
 
-Only routes whose app is actually producing audio are checked. A pre-armed route
-for an idle app legitimately receives no callbacks.
+The primary signal is the aggregate device's own state, not the flow of audio:
+measured, a device stays `running` even for a pre-armed route whose app is idle,
+so it can be trusted whether or not audio is flowing. Missing render callbacks
+are only treated as a fault for an app that is actually producing audio, since an
+idle app's tap has nothing to deliver.
+
+If an app ever goes silent anyway, this prints the reason:
+
+```bash
+/usr/bin/log show --last 10m --predicate 'subsystem == "com.ydps915.VolumeMixer"' --style compact
+```
+
+The `health` line records each rendering route's state and is written only when
+it changes.
 
 ## Screen sharing and echo
 

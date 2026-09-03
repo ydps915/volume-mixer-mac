@@ -112,6 +112,7 @@ private final class AudioRouteController: @unchecked Sendable {
     /// idle app legitimately gets no callbacks, so it must never be judged dead.
     private var playingTargetIDs: Set<String> = []
     private var lastHealthCheckAt = Date.distantPast
+    private var lastHealthSummary: String?
     var onLevels: (@Sendable ([String: Float]) -> Void)?
     var onRoutesNeedRebuild: (@Sendable () -> Void)?
 
@@ -219,23 +220,41 @@ private final class AudioRouteController: @unchecked Sendable {
             let needsMixing = !isUnity(target.gain) || mixingTargetIDs.contains(id)
             let mode: ProcessTapRouteMode = needsMixing ? .mixing : .monitoring
 
-            if let route = routes[id],
-               route.processObjectIDs == target.processObjectIDs,
-               route.outputDeviceUID == outputDeviceUID,
-               route.mode == mode {
-                route.setGain(target.gain)
-                route.setLimitsPeaks(target.limitPeaks)
-                continue
+            if let route = routes[id] {
+                let reason: String?
+                if route.processObjectIDs != target.processObjectIDs {
+                    reason = "process set \(route.processObjectIDs.count)->\(target.processObjectIDs.count)"
+                } else if route.outputDeviceUID != outputDeviceUID {
+                    reason = "output device"
+                } else if route.mode != mode {
+                    reason = "mode"
+                } else {
+                    reason = nil
+                }
+
+                guard let reason else {
+                    route.setGain(target.gain)
+                    route.setLimitsPeaks(target.limitPeaks)
+                    continue
+                }
+                AppLogger.audio.notice(
+                    "rebuilding \(id, privacy: .public): \(reason, privacy: .public)"
+                )
             }
 
+            // Retire before the cooldown check, never after. Keeping a route
+            // that no longer matches meant the app stayed muted behind a tap
+            // built from stale state — silent until the mixer was toggled off
+            // and on, which is exactly the symptom this caused.
+            retireRoute(id: id)
+
             // Do not hammer Core Audio with tap creation for a target that just
-            // failed; it retries on every hardware event and every rescan.
+            // failed; it retries on every hardware event and every rescan. The
+            // app plays normally in the meantime because its tap is gone.
             if let notBefore = retryNotBefore[id], now < notBefore {
                 if needsMixing { failures.append(target) }
                 continue
             }
-
-            retireRoute(id: id)
             guard let route = ProcessTapRoute(
                 processObjectIDs: target.processObjectIDs,
                 outputDeviceUID: outputDeviceUID,
@@ -332,13 +351,29 @@ private final class AudioRouteController: @unchecked Sendable {
         lastHealthCheckAt = now
 
         var unhealthy: [(id: String, reason: String)] = []
+        var snapshot: [String] = []
+
         for (id, route) in routes where route.mode == .mixing {
-            // An idle app's tap simply has nothing to deliver.
-            guard playingTargetIDs.contains(id) else {
-                lastRenderCounts.removeValue(forKey: id)
-                stalledChecks.removeValue(forKey: id)
+            let isPlaying = playingTargetIDs.contains(id)
+            let state = route.aggregateState
+            snapshot.append(
+                "\(id):playing=\(isPlaying),exists=\(state.exists),running=\(state.isRunning)"
+            )
+
+            // The aggregate's own state is the reliable signal: measured, it
+            // stays `running` for a pre-armed route whose app is idle, so unlike
+            // the render count it can be trusted whether or not audio is
+            // flowing. If it is gone or stopped, the app is muted behind a route
+            // that renders nothing — silence until the mixer is toggled.
+            guard state.exists else {
+                unhealthy.append((id, "aggregate device gone"))
                 continue
             }
+            guard state.isRunning else {
+                unhealthy.append((id, "aggregate device stopped"))
+                continue
+            }
+
             // A device that changes format underneath a running route — a
             // Bluetooth headset switching sample rate is the common case —
             // leaves it rendering into the wrong shape, which is heard as
@@ -346,6 +381,14 @@ private final class AudioRouteController: @unchecked Sendable {
             if let current = AudioHardware.outputStreamFormat(deviceUID: route.outputDeviceUID),
                !Self.isSameFormat(current, route.deviceFormat) {
                 unhealthy.append((id, "device format changed"))
+                continue
+            }
+
+            // An idle app's tap has nothing to deliver, so no callbacks is
+            // normal there and only a playing app can be judged by them.
+            guard isPlaying else {
+                lastRenderCounts.removeValue(forKey: id)
+                stalledChecks.removeValue(forKey: id)
                 continue
             }
 
@@ -357,11 +400,18 @@ private final class AudioRouteController: @unchecked Sendable {
                 let stalls = (stalledChecks[id] ?? 0) + 1
                 stalledChecks[id] = stalls
                 if stalls >= Self.stallTolerance {
-                    unhealthy.append((id, "stopped rendering"))
+                    unhealthy.append((id, "stopped rendering while playing"))
                 }
             } else {
                 stalledChecks[id] = 0
             }
+        }
+
+        // Once a second forever is noise; only a change is worth recording.
+        let summary = snapshot.sorted().joined(separator: " | ")
+        if !summary.isEmpty, summary != lastHealthSummary {
+            lastHealthSummary = summary
+            AppLogger.audio.notice("health \(summary, privacy: .public)")
         }
 
         guard !unhealthy.isEmpty else { return }
@@ -619,6 +669,23 @@ private final class ProcessTapRoute: @unchecked Sendable {
     /// Monotonic count of render callbacks. A mixing route whose count stops
     /// advancing is dead: its app is muted at the system level and silent.
     var renderCount: UInt64 { renderCounter.load() }
+
+    /// Whether Core Audio still has this route's aggregate device, and still has
+    /// it running. Unlike the render count this does not depend on the app
+    /// actually producing audio, so it is valid for a pre-armed route too.
+    var aggregateState: (exists: Bool, isRunning: Bool) {
+        guard aggregateDeviceID != kAudioObjectUnknown else { return (false, false) }
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsRunning,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectGetPropertyData(aggregateDeviceID, &address, 0, nil, &size, &value)
+        guard status == noErr else { return (false, false) }
+        return (true, value != 0)
+    }
 
     /// Drains the peak accumulated since the last call.
     func consumeLevel() -> Float {
